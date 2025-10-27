@@ -18,8 +18,10 @@ if (!isset($_SESSION['user_id']) || !isset($_SESSION['role']) || $_SESSION['role
     exit();
 }
 
-$current_username = $_SESSION['username'];
-$role = $_SESSION['role'];
+$current_user_id = $_SESSION['user_id']; // Get current user's ID for delete check
+// Use name from session for display, fallback to username
+$current_display_name = $_SESSION['name'] ?? $_SESSION['username'] ?? 'Admin';
+$current_role = $_SESSION['role']; // Should be 'admin' based on check above
 
 // --- Enhanced FPDF Class ---
 class PDF extends FPDF {
@@ -82,7 +84,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $sortKeyLabel = str_replace(['_','only'], [' ',''], $filters['sortKey'] ?? 'Default');
         $periodLabel .= " | Sorted By: " . ucwords($sortKeyLabel) . " " . ($filters['sortAsc'] ? '(Asc)' : '(Desc)');
 
-        $pdf->setReportHeader($reportTitle, $periodLabel, $current_username);
+        // Use the display name for the PDF header
+        $pdf->setReportHeader($reportTitle, $periodLabel, $current_display_name);
         $pdf->AddPage();
         $pdf->SetFont('Arial', '', 8);
 
@@ -126,26 +129,43 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     elseif ($action === 'add') {
         if (!required('username') || !required('name') || !required('password') || !required('role') || !required('status') ) {
+            $_SESSION['error_message'] = "All fields are required."; // Add feedback
             header("Location: users.php"); exit();
         }
         $new_username = trim($_POST['username']);
         $new_name = trim($_POST['name']);
-        $new_password = $_POST['password'];
+        $new_password = $_POST['password']; // Don't trim password
         $new_role = trim($_POST['role']);
         $new_status = trim($_POST['status']);
+        
+        // Basic password length validation
+        if (strlen($new_password) < 6) {
+             $_SESSION['error_message'] = "Password must be at least 6 characters long.";
+             header("Location: users.php"); exit();
+        }
         $hashed_password = password_hash($new_password, PASSWORD_DEFAULT);
 
+        // Check if username already exists
         $check_stmt = $conn->prepare("SELECT id FROM users WHERE username = ?");
         $check_stmt->bind_param("s", $new_username);
         $check_stmt->execute();
         $check_result = $check_stmt->get_result();
 
-        if ($check_result->num_rows === 0) {
+        if ($check_result->num_rows > 0) {
+             $_SESSION['error_message'] = "Username already exists.";
+        } else {
+            // Insert new user
             $stmt = $conn->prepare("INSERT INTO users (username, name, password, role, status, created_at) VALUES (?, ?, ?, ?, ?, NOW())");
             if ($stmt) {
                 $stmt->bind_param("sssss", $new_username, $new_name, $hashed_password, $new_role, $new_status);
-                $stmt->execute();
+                if($stmt->execute()){
+                     $_SESSION['success_message'] = "User added successfully.";
+                } else {
+                     $_SESSION['error_message'] = "Error adding user: " . $stmt->error;
+                }
                 $stmt->close();
+            } else {
+                 $_SESSION['error_message'] = "Database error preparing statement: " . $conn->error;
             }
         }
         $check_stmt->close();
@@ -155,6 +175,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     } elseif ($action === 'edit') {
         $id = intval($_POST['id'] ?? 0);
         if ($id <= 0 || !required('username') || !required('name') || !required('role') || !required('status')) {
+             $_SESSION['error_message'] = "Missing required fields for editing.";
             header("Location: users.php"); exit();
         }
         $edit_username = trim($_POST['username']);
@@ -162,38 +183,74 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $edit_role = trim($_POST['role']);
         $edit_status = trim($_POST['status']);
 
+        // Check if username exists for another user
         $check_stmt = $conn->prepare("SELECT id FROM users WHERE username = ? AND id != ?");
         $check_stmt->bind_param("si", $edit_username, $id);
         $check_stmt->execute();
         $check_result = $check_stmt->get_result();
 
-        if ($check_result->num_rows === 0) {
+        if ($check_result->num_rows > 0) {
+             $_SESSION['error_message'] = "Username already exists for another user.";
+        } else {
+            // Update user details
             $stmt = $conn->prepare("UPDATE users SET username = ?, name = ?, role = ?, status = ? WHERE id = ?");
             if ($stmt) {
                 $stmt->bind_param("ssssi", $edit_username, $edit_name, $edit_role, $edit_status, $id);
-                $stmt->execute();
+                 if($stmt->execute()){
+                     $_SESSION['success_message'] = "User updated successfully.";
+                     // *** ADDED: Update session name if editing own profile ***
+                     if ($id === $current_user_id) {
+                         $_SESSION['name'] = $edit_name; // Update the session immediately
+                     }
+                     // *******************************************************
+                } else {
+                     $_SESSION['error_message'] = "Error updating user: " . $stmt->error;
+                }
                 $stmt->close();
+            } else {
+                 $_SESSION['error_message'] = "Database error preparing statement: " . $conn->error;
             }
         }
-         $check_stmt->close();
+        $check_stmt->close();
         header("Location: users.php"); exit();
 
     } elseif ($action === 'delete') {
         $id = intval($_POST['id'] ?? 0);
-        if ($id > 0 && $id !== $_SESSION['user_id']) {
+        // Prevent deleting the currently logged-in user
+        if ($id > 0 && $id !== $current_user_id) {
             $stmt = $conn->prepare("DELETE FROM users WHERE id = ?");
-            if ($stmt) { $stmt->bind_param("i", $id); $stmt->execute(); $stmt->close(); }
+            if ($stmt) {
+                $stmt->bind_param("i", $id);
+                if($stmt->execute()){
+                     $_SESSION['success_message'] = "User deleted successfully.";
+                } else {
+                     $_SESSION['error_message'] = "Error deleting user: " . $stmt->error;
+                }
+                $stmt->close();
+            } else {
+                 $_SESSION['error_message'] = "Database error preparing statement: " . $conn->error;
+            }
+        } elseif ($id === $current_user_id) {
+            $_SESSION['error_message'] = "You cannot delete your own account.";
+        } else {
+            $_SESSION['error_message'] = "Invalid user ID for deletion.";
         }
         header("Location: users.php"); exit();
     }
 }
 
-// Fetch users data
+// Fetch users data for display
 $users_q = $conn->query("
-    SELECT id, username, name, role, status, created_at, DATE(created_at) as date_created_only 
+    SELECT user_id, username, name, role, status, created_at, DATE(created_at) as date_created_only
     FROM users
     ORDER BY created_at DESC
 ");
+
+// Get potential feedback messages from session
+$error_message = $_SESSION['error_message'] ?? null;
+$success_message = $_SESSION['success_message'] ?? null;
+unset($_SESSION['error_message'], $_SESSION['success_message']); // Clear messages after reading
+
 ?>
 <!doctype html>
 <html lang="en">
@@ -276,7 +333,7 @@ form[data-mode="edit"] .password-field { display: none; } /* Hide in edit mode *
   <nav class="side-menu">
     <a href="dashboard.php"><i class="fa fa-chart-pie"></i><span class="label">Dashboard</span></a>
     <a href="transactions/collections.php"><i class="fa fa-cash-register"></i><span class="label">Transactions</span></a>
-    <?php if ($_SESSION['role'] === 'admin'): ?>
+    <?php if ($current_role === 'admin'): // Use variable already defined ?>
     <a href="users.php" class="active"><i class="fa fa-users-cog"></i><span class="label">Users</span></a>
     <?php endif; ?>
     <a href="logout.php"><i class="fa fa-sign-out-alt"></i><span class="label">Logout</span></a>
@@ -286,8 +343,8 @@ form[data-mode="edit"] .password-field { display: none; } /* Hide in edit mode *
 <main class="main">
   <div class="header">
     <h1>Manage Users</h1>
-    <div class="user-info">Logged in as: <b><?= htmlspecialchars($current_username) ?></b> (Admin)</div>
-  </div>
+    <div class="user-info">Logged in as: <b><?= htmlspecialchars($current_display_name) ?></b></div>
+    </div>
 
   <div class="toolbar">
     <input type="text" id="searchInput" placeholder="🔍 Search user...">
@@ -312,6 +369,7 @@ form[data-mode="edit"] .password-field { display: none; } /* Hide in edit mode *
       </thead>
       <tbody>
         <?php while ($r = $users_q->fetch_assoc()):
+            // Encode the full row data, including the name, for JavaScript
             $data = htmlentities(json_encode($r), ENT_QUOTES, 'UTF-8');
             $status_text = ucfirst($r['status']);
             $status_class = $r['status'] === 'active' ? 'status-active' : 'status-inactive';
@@ -325,7 +383,7 @@ form[data-mode="edit"] .password-field { display: none; } /* Hide in edit mode *
             <td><?= $date_formatted ?></td>
             <td>
               <button class="icon-btn editBtn" title="Edit"><i class="fa fa-pen"></i></button>
-              <?php if ($r['id'] !== $_SESSION['user_id']): ?>
+              <?php if ($r['user_id'] !== $current_user_id): // Check against current user ID ?>
                 <button class="icon-btn deleteBtn" title="Delete"><i class="fa fa-trash"></i></button>
               <?php endif; ?>
             </td>
@@ -352,8 +410,7 @@ form[data-mode="edit"] .password-field { display: none; } /* Hide in edit mode *
 
       <div class="password-field">
           <label>Password</label>
-          <input type="password" name="password" id="password">
-      </div>
+          <input type="password" name="password" id="password"> </div>
 
       <label>Role</label>
       <select name="role" id="role" required>
@@ -405,11 +462,12 @@ const openAddBtn = document.getElementById('openAddBtn');
 const closeAdd = document.getElementById('closeAdd');
 const addTitle = document.getElementById('addTitle');
 const passwordInput = document.getElementById('password');
+const nameInput = document.getElementById('name'); // Get name input
 
 openAddBtn.onclick = () => {
   formAdd.reset();
-  formAdd.dataset.mode = 'add';
-  passwordInput.required = true;
+  formAdd.dataset.mode = 'add'; // Set mode for validation
+  passwordInput.required = true; // Password required for adding
   document.getElementById('formAddAction').value = 'add';
   document.getElementById('formAddId').value = '';
   addTitle.textContent = 'New User';
@@ -421,13 +479,13 @@ closeAdd.onclick = () => modalAdd.classList.remove('active');
 document.querySelectorAll('.editBtn').forEach(btn=>{
   btn.onclick = (e)=>{
     const tr = btn.closest('tr');
-    const data = JSON.parse(tr.dataset.row);
+    const data = JSON.parse(tr.dataset.row); // This now contains the 'name'
     formAdd.reset();
-    formAdd.dataset.mode = 'edit';
-    passwordInput.required = false;
+    formAdd.dataset.mode = 'edit'; // Set mode for validation
+    passwordInput.required = false; // Password not required for editing
     document.getElementById('formAddAction').value = 'edit';
     document.getElementById('formAddId').value = data.id;
-    document.getElementById('name').value = data.name || ''; // Populate name
+    nameInput.value = data.name || ''; // Populate name field from data
     document.getElementById('username').value = data.username;
     document.getElementById('role').value = data.role;
     document.getElementById('status').value = data.status;
@@ -442,24 +500,35 @@ document.querySelectorAll('.deleteBtn').forEach(btn=>{
   btn.onclick = ()=>{
     const data = JSON.parse(btn.closest('tr').dataset.row);
     const id = data.id;
-    const currentUserId = <?= $_SESSION['user_id'] ?>;
+    // Get current user ID from PHP session variable embedded in JS
+    const currentUserId = <?= $current_user_id ?>;
 
     if (id === currentUserId) {
          Swal.fire({ icon: 'error', title: 'Action Denied', text: 'You cannot delete your own account.', buttonsStyling: false, customClass: { confirmButton: 'btn primary' } });
-         return;
+         return; // Stop execution
     }
+
     Swal.fire({
         title: 'Are you sure?',
         text: `Delete user: ${data.username}? This cannot be undone.`,
         icon: 'warning',
         showCancelButton: true,
         confirmButtonText: 'Yes, delete it!',
+        cancelButtonText: 'Cancel', // Added cancel text
         buttonsStyling: false,
-        customClass: { confirmButton: 'btn primary', cancelButton: 'btn' }
+        customClass: { confirmButton: 'btn primary', cancelButton: 'btn' } // Apply button styles
     }).then((result) => {
         if (result.isConfirmed) {
-            const fd = new FormData(); fd.append('action','delete'); fd.append('id', id);
-            fetch('users.php', { method:'POST', body: fd }).then(()=> location.reload());
+            // Use a form submission for delete for simplicity and consistency
+            const deleteForm = document.createElement('form');
+            deleteForm.method = 'POST';
+            deleteForm.action = 'users.php';
+            deleteForm.innerHTML = `
+                <input type="hidden" name="action" value="delete">
+                <input type="hidden" name="id" value="${id}">
+            `;
+            document.body.appendChild(deleteForm);
+            deleteForm.submit();
         }
     });
   }
@@ -479,15 +548,19 @@ function sortRows(rowsToSort, key, asc) {
     rowsToSort.sort((a, b) => {
       const A_data = JSON.parse(a.dataset.row);
       const B_data = JSON.parse(b.dataset.row);
-      const A = A_data[key];
-      const B = B_data[key];
+      let A = A_data[key]; // Use let for potential modification
+      let B = B_data[key];
 
+      // Handle date sorting using the full timestamp
       if (key === 'date_created_only') {
-          const dateA = new Date(A_data['created_at'] || 0);
-          const dateB = new Date(B_data['created_at'] || 0);
+          A = A_data['created_at'] || 0; // Use full timestamp
+          B = B_data['created_at'] || 0;
+          const dateA = new Date(A);
+          const dateB = new Date(B);
           return asc ? dateA - dateB : dateB - dateA;
       }
       
+      // Default string comparison (case-insensitive)
       const sa = (A || '').toString().toLowerCase();
       const sb = (B || '').toString().toLowerCase();
       return asc ? sa.localeCompare(sb) : sb.localeCompare(sa);
@@ -498,13 +571,13 @@ function renderTable() {
     const filteredRows = getFilteredRows();
     sortRows(filteredRows, currentSortKey, currentSortAsc);
     const tbody = document.querySelector('#usersTable tbody');
-    tbody.innerHTML = '';
+    tbody.innerHTML = ''; // Clear existing rows
     const start = (currentPage - 1) * rowsPerPage;
     const end = start + rowsPerPage;
     const pageRows = filteredRows.slice(start, end);
-    allRows.forEach(r => r.style.display = 'none');
+    // No need to hide all rows if tbody is cleared
     pageRows.forEach(r => {
-        r.style.display = '';
+        // r.style.display = ''; // No longer needed
         tbody.appendChild(r);
     });
     renderPagination(filteredRows.length);
@@ -512,9 +585,10 @@ function renderTable() {
 
 function renderPagination(totalFilteredRows) {
   const container = document.getElementById('pagination');
-  container.innerHTML = '';
+  container.innerHTML = ''; // Clear existing pagination
   const totalPages = Math.max(1, Math.ceil(totalFilteredRows / rowsPerPage));
-  if (totalPages <= 1) return;
+  if (totalPages <= 1) return; // No pagination needed for 1 page or less
+
   for (let i = 1; i <= totalPages; i++) {
     const b = document.createElement('button');
     b.textContent = i;
@@ -526,25 +600,43 @@ function renderPagination(totalFilteredRows) {
 
 /* --- Event Listeners --- */
 searchInput.addEventListener('input', () => { currentPage = 1; renderTable(); });
-rowsPerPageInput.addEventListener('change', () => { let newRows = parseInt(rowsPerPageInput.value); if (newRows > 0) { rowsPerPage = newRows; } else { rowsPerPageInput.value = rowsPerPage; } currentPage = 1; renderTable(); });
+rowsPerPageInput.addEventListener('change', () => {
+    let newRows = parseInt(rowsPerPageInput.value);
+    if (newRows > 0) {
+        rowsPerPage = newRows;
+    } else {
+        rowsPerPageInput.value = rowsPerPage; // Reset input if invalid
+    }
+    currentPage = 1;
+    renderTable();
+});
 
 document.querySelectorAll('th[data-key]').forEach(th => {
   th.addEventListener('click', () => {
     const key = th.dataset.key;
-    if (currentSortKey === key) { currentSortAsc = !currentSortAsc; } else { currentSortKey = key; currentSortAsc = true; }
-    document.querySelectorAll('.sort-icon').forEach(i => i.className = 'fa fa-sort sort-icon');
-    th.querySelector('.sort-icon').className = currentSortAsc ? 'fa fa-sort-up sort-icon' : 'fa fa-sort-down sort-icon';
-    currentPage = 1; renderTable();
+    if (currentSortKey === key) {
+        currentSortAsc = !currentSortAsc; // Toggle direction
+    } else {
+        currentSortKey = key; // Set new key
+        currentSortAsc = true; // Default to ascending
+    }
+    // Update icons visually
+    document.querySelectorAll('#usersTable th .sort-icon').forEach(i => i.className = 'fa fa-sort sort-icon'); // Reset others
+    th.querySelector('.sort-icon').className = currentSortAsc ? 'fa fa-sort-up sort-icon' : 'fa fa-sort-down sort-icon'; // Set current
+
+    currentPage = 1; // Reset to first page on sort
+    renderTable();
   });
 });
 
 /* PDF Generation Button Listener */
 generatePdfBtn.addEventListener('click', () => {
-    const filteredAndSortedRows = getFilteredRows();
-    sortRows(filteredAndSortedRows, currentSortKey, currentSortAsc);
+    const filteredAndSortedRows = getFilteredRows(); // Get all currently filtered rows
+    sortRows(filteredAndSortedRows, currentSortKey, currentSortAsc); // Ensure they are sorted
 
     const dataForPdf = filteredAndSortedRows.map(row => {
         const cells = row.getElementsByTagName('td');
+        // Extract text content from table cells to match display
         return {
             name: cells[0]?.textContent || '',
             username: cells[1]?.textContent || '',
@@ -561,37 +653,72 @@ generatePdfBtn.addEventListener('click', () => {
 
     pdfDataInput.value = JSON.stringify(dataForPdf);
     pdfFiltersInput.value = JSON.stringify(filtersForPdf);
-    pdfForm.submit();
+    pdfForm.submit(); // Submit the hidden form
 });
 
 /* --- Form Validation & Modal Close --- */
-renderTable(); // Initial render
+renderTable(); // Initial render on page load
 
 formAdd.addEventListener('submit', function(e){
-  const name = document.getElementById('name').value.trim();
+  // Trim values and get mode
+  const name = nameInput.value.trim();
   const username = document.getElementById('username').value.trim();
-  const password = document.getElementById('password').value;
+  const password = passwordInput.value; // Don't trim password
   const role = document.getElementById('role').value;
   const status = document.getElementById('status').value;
-  const mode = formAdd.dataset.mode;
+  const mode = formAdd.dataset.mode; // 'add' or 'edit'
   let errorMessage = '';
 
+  // Basic Validations
   if (!name) { errorMessage = 'Please provide a full name.'; }
   else if (!username) { errorMessage = 'Please provide a username.'; }
-  else if (mode === 'add' && (!password || password.length < 6)) { errorMessage = 'Please provide a password (at least 6 characters).'; }
+  // Password validation only needed when adding
+  else if (mode === 'add' && (!password || password.length < 6)) {
+      errorMessage = 'Please provide a password (at least 6 characters).';
+  }
   else if (!role) { errorMessage = 'Please select a role.'; }
   else if (!status) { errorMessage = 'Please select a status.'; }
 
+  // If validation fails, prevent submission and show error
   if (errorMessage) {
-      e.preventDefault();
-      Swal.fire({ icon: 'error', title: 'Validation Error', text: errorMessage, buttonsStyling: false, customClass: { confirmButton: 'btn primary' } });
-      return false;
+      e.preventDefault(); // Stop form submission
+      Swal.fire({
+          icon: 'error',
+          title: 'Validation Error',
+          text: errorMessage,
+          buttonsStyling: false,
+          customClass: { confirmButton: 'btn primary' }
+      });
+      return false; // Indicate failure
   }
+  // Allow form submission if validation passes
 });
 
+// Close modal if clicking outside content
 document.querySelectorAll('.modal').forEach(m=>{
-  m.addEventListener('click', (ev)=>{ if (ev.target === m) m.classList.remove('active'); });
+  m.addEventListener('click', (ev)=>{
+      if (ev.target === m) { // Check if click is on the backdrop
+          m.classList.remove('active');
+      }
+  });
 });
+
+// Display feedback messages from PHP using SweetAlert
+document.addEventListener('DOMContentLoaded', () => {
+    <?php if ($success_message): ?>
+        Swal.fire({
+            icon: 'success', title: 'Success', text: '<?= addslashes($success_message) ?>',
+            timer: 2000, showConfirmButton: false
+        });
+    <?php elseif ($error_message): ?>
+        Swal.fire({
+             icon: 'error', title: 'Error', text: '<?= addslashes($error_message) ?>',
+             confirmButtonText: 'OK', buttonsStyling: false,
+             customClass: { confirmButton: 'btn primary' }
+         });
+    <?php endif; ?>
+});
+
 </script>
 </body>
 </html>

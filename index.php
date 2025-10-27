@@ -17,7 +17,8 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
     if (empty($username) || empty($password)) {
         $error = "Please enter both username and password.";
     } else {
-        $sql = "SELECT * FROM users WHERE username=?";
+        // Explicitly select columns, including user_id
+        $sql = "SELECT user_id, username, password, role, status, name FROM users WHERE username=?";
         $stmt = mysqli_prepare($conn, $sql);
         mysqli_stmt_bind_param($stmt, 's', $username);
         mysqli_stmt_execute($stmt);
@@ -26,24 +27,37 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
         if ($row = mysqli_fetch_assoc($result)) {
             // Verify password
             if (password_verify($password, $row['password'])) {
-                
-                // *** FIX: Check if user account is active ***
+
+                // Check if user account is active
                 if ($row['status'] === 'active') {
                     // Set session variables and redirect
-                    $_SESSION['user_id'] = $row['id'];
+
+                    // ===================================
+                    // --- START: CORRECTED LINE ---
+                    // ===================================
+                    // Use the correct key 'user_id' from the SQL result
+                    $_SESSION['user_id'] = $row['user_id'];
+                    // ===================================
+                    // --- END: CORRECTED LINE ---
+                    // ===================================
+
                     $_SESSION['username'] = $row['username'];
                     $_SESSION['role'] = $row['role'];
+
+                    // Set 'name' session variable: Use 'name' if not empty, else fallback to 'username'
+                    $_SESSION['name'] = (!empty($row['name'])) ? trim($row['name']) : $row['username'];
+
                     header("Location: dashboard.php");
                     exit();
                 } else {
                     $error = "Your account is inactive. Please contact an administrator.";
                 }
             } else {
-                // *** FIX: Generic error for security ***
+                // Generic error for security
                 $error = "Invalid username or password.";
             }
         } else {
-            // *** FIX: Generic error for security ***
+            // Generic error for security
             $error = "Invalid username or password.";
         }
         mysqli_stmt_close($stmt);
