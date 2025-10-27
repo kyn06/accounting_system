@@ -1,7 +1,7 @@
 <?php
-$servername = "127.0.0.1:3006";
+$servername = "127.0.0.1";
 $username = "root";
-$password = "aespa";
+$password = "";
 $database = "accounting_system";
 
 $conn = mysqli_connect($servername, $username, $password, $database);
