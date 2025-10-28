@@ -8,6 +8,47 @@ header("Expires: 0"); // Expire immediately
 
 require_once "db.php";
 
+// --- LOGIN ATTEMPT CONSTANTS AND HELPERS ---
+define('MAX_LOGIN_ATTEMPTS', 3);
+define('LOCKOUT_DURATION', 900); // 15 minutes (900 seconds)
+
+/**
+ * Records a failed login attempt for a user.
+ * If attempts exceed max, sets a lockout time.
+ */
+function record_failed_attempt($username) {
+    if (!isset($_SESSION['login_attempts'][$username])) {
+        $_SESSION['login_attempts'][$username] = 0;
+    }
+    
+    $_SESSION['login_attempts'][$username]++;
+    
+    if ($_SESSION['login_attempts'][$username] >= MAX_LOGIN_ATTEMPTS) {
+        // Set lockout time
+        $_SESSION['lockout_until'][$username] = time() + LOCKOUT_DURATION;
+        // Clear the attempt counter now that they are locked out
+        unset($_SESSION['login_attempts'][$username]);
+    }
+}
+
+/**
+ * Gets the appropriate error message for a failed login.
+ * Includes timer logic.
+ */
+function get_failure_message($username) {
+    // Check if user is currently locked out
+    if (isset($_SESSION['lockout_until'][$username]) && $_SESSION['lockout_until'][$username] > time()) {
+        $remaining = $_SESSION['lockout_until'][$username] - time();
+        $minutes = ceil($remaining / 60); // Round up to the nearest minute
+        return "Too many failed attempts. Please try again in $minutes minute(s).";
+    }
+    
+    // Otherwise, show attempts remaining
+    $attempts = $_SESSION['login_attempts'][$username] ?? 0;
+    $attempts_left = MAX_LOGIN_ATTEMPTS - $attempts;
+    return "Invalid username or password. $attempts_left attempt(s) remaining.";
+}
+
 // --- Initial GET Request or Non-AJAX POST (Fallback/Security) ---
 // If user is already logged in, redirect away from login page
 if (isset($_SESSION['user_id'])) {
@@ -31,42 +72,62 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
     if (empty($username) || empty($password)) {
         $response['message'] = "Please enter both username and password.";
     } else {
-        $sql = "SELECT user_id, username, password, role, status, name FROM users WHERE username=?";
-        $stmt = mysqli_prepare($conn, $sql);
-        mysqli_stmt_bind_param($stmt, 's', $username);
-        mysqli_stmt_execute($stmt);
-        $result = mysqli_stmt_get_result($stmt);
+        // --- NEW: CHECK FOR EXISTING LOCKOUT FIRST ---
+        if (isset($_SESSION['lockout_until'][$username]) && $_SESSION['lockout_until'][$username] > time()) {
+            
+            $remaining = $_SESSION['lockout_until'][$username] - time();
+            $minutes = ceil($remaining / 60);
+            $response['message'] = "Too many failed attempts. Please try again in $minutes minute(s).";
+            
+        } else {
+            // --- User is not locked out, proceed with login ---
+            $sql = "SELECT user_id, username, password, role, status, name FROM users WHERE username=?";
+            $stmt = mysqli_prepare($conn, $sql);
+            mysqli_stmt_bind_param($stmt, 's', $username);
+            mysqli_stmt_execute($stmt);
+            $result = mysqli_stmt_get_result($stmt);
 
-        if ($row = mysqli_fetch_assoc($result)) {
-            if (password_verify($password, $row['password'])) {
-                if ($row['status'] === 'active') {
-                    // Regenerate session ID for security upon login
-                    session_regenerate_id(true);
+            if ($row = mysqli_fetch_assoc($result)) {
+                if (password_verify($password, $row['password'])) {
+                    if ($row['status'] === 'active') {
+                        
+                        // --- NEW: CLEAR ATTEMPTS ON SUCCESS ---
+                        unset($_SESSION['login_attempts'][$username]);
+                        unset($_SESSION['lockout_until'][$username]);
+                        // --- END NEW ---
 
-                    // Set session variables
-                    $_SESSION['user_id'] = $row['user_id'];
-                    $_SESSION['username'] = $row['username'];
-                    $_SESSION['role'] = $row['role'];
-                    $_SESSION['name'] = (!empty($row['name'])) ? trim($row['name']) : $row['username'];
+                        // Regenerate session ID for security upon login
+                        session_regenerate_id(true);
 
-                    // Determine redirect URL
-                    $redirect_url = ($row['role'] === 'admin') ? 'dashboard.php' : 'transactions/collections.php';
+                        // Set session variables
+                        $_SESSION['user_id'] = $row['user_id'];
+                        $_SESSION['username'] = $row['username'];
+                        $_SESSION['role'] = $row['role'];
+                        $_SESSION['name'] = (!empty($row['name'])) ? trim($row['name']) : $row['username'];
 
-                    // Prepare success response
-                    $response = [
-                        'status' => 'success',
-                        'redirect' => $redirect_url
-                    ];
+                        // Determine redirect URL
+                        $redirect_url = ($row['role'] === 'admin') ? 'dashboard.php' : 'transactions/collections.php';
+
+                        // Prepare success response
+                        $response = [
+                            'status' => 'success',
+                            'redirect' => $redirect_url
+                        ];
+                    } else {
+                        $response['message'] = "Your account is inactive. Please contact an administrator.";
+                    }
                 } else {
-                    $response['message'] = "Your account is inactive. Please contact an administrator.";
+                    // --- NEW: HANDLE FAILED PASSWORD ---
+                    record_failed_attempt($username);
+                    $response['message'] = get_failure_message($username);
                 }
             } else {
-                $response['message'] = "Invalid username or password."; // Generic error
+                // --- NEW: HANDLE FAILED USERNAME (prevents username enumeration) ---
+                record_failed_attempt($username);
+                $response['message'] = get_failure_message($username);
             }
-        } else {
-            $response['message'] = "Invalid username or password."; // Generic error
-        }
-        mysqli_stmt_close($stmt);
+            mysqli_stmt_close($stmt);
+        } // End of the lockout check 'else'
     }
 
     // Send JSON response and stop script execution
