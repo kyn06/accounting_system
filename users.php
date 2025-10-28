@@ -3,6 +3,11 @@
 session_start();
 require_once 'db.php'; // Assumes db.php is in the parent directory
 
+// Prevent browser caching
+header("Cache-Control: no-store, no-cache, must-revalidate, max-age=0");
+header("Pragma: no-cache");
+header("Expires: 0"); // Expire immediately
+
 // --- Include FPDF ---
 $fpdf_path = __DIR__ . '/fpdf/fpdf.php'; // Path from root
 if (file_exists($fpdf_path)) {
@@ -14,16 +19,17 @@ if (file_exists($fpdf_path)) {
 
 // --- Security Check: Ensure user is logged in and is an admin ---
 if (!isset($_SESSION['user_id']) || !isset($_SESSION['role']) || $_SESSION['role'] !== 'admin') {
-    header("Location: dashboard.php");
+    // Redirect non-admins or logged-out users
+    header("Location: dashboard.php"); // Or login page: index.php
     exit();
 }
 
 $current_user_id = $_SESSION['user_id']; // Get current user's ID for delete check
-// Use name from session for display, fallback to username
-$current_display_name = $_SESSION['name'] ?? $_SESSION['username'] ?? 'Admin';
+// Use name from session for display, fallback to username, AND CONVERT TO UPPERCASE
+$current_display_name = strtoupper($_SESSION['name'] ?? $_SESSION['username'] ?? 'Admin');
 $current_role = $_SESSION['role']; // Should be 'admin' based on check above
 
-// --- Enhanced FPDF Class ---
+// --- Enhanced FPDF Class (Keep as before) ---
 class PDF extends FPDF {
     private $reportTitle = 'Report'; private $periodLabel = ''; private $generatedBy = '';
     private $colorAccent = [216, 76, 115]; private $colorLightPink = [255, 240, 246]; private $colorMuted = [107, 74, 87]; private $colorDark = [61, 26, 42]; private $colorBorder = [243, 208, 220];
@@ -42,35 +48,56 @@ class PDF extends FPDF {
             $this->SetFillColor($fill ? 245 : 255);
             for ($i = 0; $i < count($header); $i++) {
                 $cellValue = $row[$i] ?? ''; $originalValue = $cellValue;
-                if (function_exists('iconv') && mb_detect_encoding($cellValue, 'UTF-8', true) && preg_match('/[^\x00-\x7F]/', $cellValue)) { $convertedValue = @iconv('UTF-8', 'cp1252//IGNORE', $cellValue); if ($convertedValue !== false) { $cellValue = $convertedValue; } }
-                $cleanOriginalValue = preg_replace('/[^0-9.]/', '', $originalValue);
-                $align = 'L'; if (strpos($originalValue, '₱') !== false) { $align = 'R'; } elseif (in_array($header[$i], ['Status', 'Role'])) { $align = 'C'; }
-                $this->Cell($widths[$i], 6, $cellValue, 'LR', 0, $align, true);
+                if (function_exists('iconv') && mb_detect_encoding((string)$cellValue, 'UTF-8', true) && preg_match('/[^\x00-\x7F]/', (string)$cellValue)) { $convertedValue = @iconv('UTF-8', 'cp1252//IGNORE', (string)$cellValue); if ($convertedValue !== false) { $cellValue = $convertedValue; } }
+                $cleanOriginalValue = preg_replace('/[^0-9.]/', '', (string)$originalValue);
+                $align = 'L'; if (strpos((string)$originalValue, '₱') !== false) { $align = 'R'; } elseif (in_array($header[$i], ['Status', 'Role'])) { $align = 'C'; }
+                $this->Cell($widths[$i], 6, (string)$cellValue, 'LR', 0, $align, true);
             }
             $this->Ln();
             $fill = !$fill;
         }
         $this->Cell(array_sum($widths), 0, '', 'T'); $this->Ln(4);
     }
-    function CalculateWidths($header, $data) { $num_cols = count($header); $pageWidth = $this->GetPageWidth() - $this->lMargin - $this->rMargin; $widths = []; for ($i = 0; $i < $num_cols; $i++) { $widths[$i] = $this->GetStringWidth($header[$i]) + 8; } $sampleData = array_slice($data, 0, 30); foreach ($sampleData as $row) { for ($i = 0; $i < $num_cols; $i++) { $cellValue = $row[$i] ?? ''; if (function_exists('iconv') && mb_detect_encoding($cellValue, 'UTF-8', true) && preg_match('/[^\x00-\x7F]/', $cellValue)) { $convertedValue = @iconv('UTF-8', 'cp1252//IGNORE', $cellValue); if($convertedValue !== false) $cellValue = $convertedValue; } $widths[$i] = max($widths[$i], $this->GetStringWidth((string)$cellValue) + 8); } } $totalWidth = array_sum($widths); if ($totalWidth <= 0 || $num_cols === 0) { return []; } $scaleFactor = $pageWidth / $totalWidth; for ($i = 0; $i < $num_cols; $i++) { $widths[$i] *= $scaleFactor; } return $widths; }
+    function CalculateWidths($header, $data) { $num_cols = count($header); $pageWidth = $this->GetPageWidth() - $this->lMargin - $this->rMargin; $widths = []; for ($i = 0; $i < $num_cols; $i++) { $widths[$i] = $this->GetStringWidth($header[$i]) + 8; } $sampleData = array_slice($data, 0, 30); foreach ($sampleData as $row) { if (!is_array($row)) continue; for ($i = 0; $i < $num_cols; $i++) { $cellValue = $row[$i] ?? ''; if (function_exists('iconv') && mb_detect_encoding((string)$cellValue, 'UTF-8', true) && preg_match('/[^\x00-\x7F]/', (string)$cellValue)) { $convertedValue = @iconv('UTF-8', 'cp1252//IGNORE', (string)$cellValue); if($convertedValue !== false) $cellValue = $convertedValue; } $widths[$i] = max($widths[$i], $this->GetStringWidth((string)$cellValue) + 8); } } $totalWidth = array_sum($widths); if ($totalWidth <= 0 || $num_cols === 0) { return []; } $scaleFactor = $pageWidth / $totalWidth; for ($i = 0; $i < $num_cols; $i++) { $widths[$i] *= $scaleFactor; } return $widths; }
 }
 // --- END FPDF Class ---
+
+// --- NEW: Function to redirect with error and form data ---
+function redirectWithError($message, $modal_id = null) {
+    $_SESSION['error_message'] = $message;
+    // Save POST data to session to repopulate form
+    $_SESSION['form_data'] = $_POST;
+    if ($modal_id) {
+        // Tell the page to reopen this specific modal
+        $_SESSION['open_modal'] = $modal_id;
+    }
+    header("Location: users.php");
+    exit();
+}
 
 
 // --- Handle POST actions: add, edit, delete ---
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = $_POST['action'] ?? '';
 
-    function required($key) { return isset($_POST[$key]) && trim($_POST[$key]) !== ''; }
+    function required($key) { return isset($_POST[$key]) && trim((string)$_POST[$key]) !== ''; }
 
     // --- PDF Generation Action ---
     if ($action === 'generate_current_view_pdf') {
-        if (defined('FPDF_MISSING') || !file_exists($fpdf_path)) { die("FPDF library not found."); }
+        if (defined('FPDF_MISSING') || !file_exists($fpdf_path)) {
+            // User-friendly fallback (JS catches this first)
+            echo "Error: PDF generation library is missing. Please contact an administrator.";
+            exit();
+        }
         
         $jsonData = $_POST['pdf_data'] ?? '[]';
         $data = json_decode($jsonData, true);
         $filters = json_decode($_POST['pdf_filters'] ?? '{}', true);
-        if (json_last_error() !== JSON_ERROR_NONE) { die("Error decoding PDF data."); }
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            // User-friendly fallback
+            echo "Error: Invalid data sent for PDF generation. Please try again.";
+            exit();
+        }
 
         $pdf = new PDF('P', 'mm', 'A4'); // Portrait
         $pdf->AliasNbPages();
@@ -84,7 +111,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $sortKeyLabel = str_replace(['_','only'], [' ',''], $filters['sortKey'] ?? 'Default');
         $periodLabel .= " | Sorted By: " . ucwords($sortKeyLabel) . " " . ($filters['sortAsc'] ? '(Asc)' : '(Desc)');
 
-        // Use the display name for the PDF header
         $pdf->setReportHeader($reportTitle, $periodLabel, $current_display_name);
         $pdf->AddPage();
         $pdf->SetFont('Arial', '', 8);
@@ -95,15 +121,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $total_users = 0;
 
             foreach ($data as $row) {
+                // Data from JS is already uppercase
                 $rowData = [
-                    $row['name'] ?? '',
-                    $row['username'] ?? '',
-                    $row['role'] ?? '',
-                    $row['status'] ?? '',
-                    $row['date'] ?? ''
+                    $row['name'] ?? '', $row['username'] ?? '', $row['role'] ?? '',
+                    $row['status'] ?? '', $row['date'] ?? ''
                 ];
                 $table_data[] = $rowData;
-                $total_users++; // Count users
+                $total_users++;
             }
 
             $pdf->BasicTable($header, $table_data);
@@ -128,116 +152,174 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     // --- END PDF BLOCK ---
 
     elseif ($action === 'add') {
-        if (!required('username') || !required('name') || !required('password') || !required('role') || !required('status') ) {
-            $_SESSION['error_message'] = "All fields are required."; // Add feedback
-            header("Location: users.php"); exit();
-        }
+        // Clearer Validation Checks with redirectWithError
+        if (!required('name')) redirectWithError("Please enter the user's Full Name.", '#modalAdd');
+        if (!required('username')) redirectWithError("Please enter a Username.", '#modalAdd');
+        if (!required('password')) redirectWithError("Please enter a Password.", '#modalAdd');
+        if (strlen($_POST['password']) < 6) redirectWithError("Password must be at least 6 characters long.", '#modalAdd');
+        if (!required('role')) redirectWithError("Please select a Role for the user.", '#modalAdd');
+        if (!required('status')) redirectWithError("Please select a Status for the user.", '#modalAdd');
+        
         $new_username = trim($_POST['username']);
-        $new_name = trim($_POST['name']);
+        $new_name = strtoupper(trim($_POST['name'])); // Save uppercase
         $new_password = $_POST['password'];
         $new_role = trim($_POST['role']);
         $new_status = trim($_POST['status']);
         
-        // Basic password length validation
-        if (strlen($new_password) < 6) {
-             $_SESSION['error_message'] = "Password must be at least 6 characters long.";
-             header("Location: users.php"); exit();
-        }
         $hashed_password = password_hash($new_password, PASSWORD_DEFAULT);
 
         // Check if username already exists
-  $check_stmt = $conn->prepare("SELECT user_id FROM users WHERE username = ?");
+        $check_stmt = $conn->prepare("SELECT user_id FROM users WHERE username = ?");
+        if (!$check_stmt) redirectWithError("Database error: Could not check username uniqueness.", '#modalAdd');
+        
         $check_stmt->bind_param("s", $new_username);
-        $check_stmt->execute();
+        if (!$check_stmt->execute()) {
+             $check_stmt->close();
+             redirectWithError("Database error: Failed to execute username check.", '#modalAdd');
+        }
+        
         $check_result = $check_stmt->get_result();
+        $username_exists = $check_result->num_rows > 0;
+        $check_stmt->close();
 
-        if ($check_result->num_rows > 0) {
-             $_SESSION['error_message'] = "Username already exists.";
+        if ($username_exists) {
+            redirectWithError("Username '$new_username' already exists. Please choose a different username.", '#modalAdd');
         } else {
             // Insert new user
             $stmt = $conn->prepare("INSERT INTO users (username, name, password, role, status, created_at) VALUES (?, ?, ?, ?, ?, NOW())");
             if ($stmt) {
                 $stmt->bind_param("sssss", $new_username, $new_name, $hashed_password, $new_role, $new_status);
                 if($stmt->execute()){
-                     $_SESSION['success_message'] = "User added successfully.";
+                    $_SESSION['success_message'] = "User '$new_username' added successfully.";
                 } else {
-                     $_SESSION['error_message'] = "Error adding user: " . $stmt->error;
+                    // User-friendly error
+                    redirectWithError("Could not add user '$new_username'. Please check the data and try again.", '#modalAdd');
                 }
                 $stmt->close();
             } else {
-                 $_SESSION['error_message'] = "Database error preparing statement: " . $conn->error;
+                // User-friendly error
+                redirectWithError("A database error occurred while preparing to save. Please try again.", '#modalAdd');
             }
         }
-        $check_stmt->close();
-        header("Location: users.php");
-        exit();
-
-    } elseif ($action === 'edit') {
+    } 
+    elseif ($action === 'edit') {
         $id = intval($_POST['id'] ?? 0);
-        if ($id <= 0 || !required('username') || !required('name') || !required('role') || !required('status')) {
-             $_SESSION['error_message'] = "Missing required fields for editing.";
-            header("Location: users.php"); exit();
-        }
+        
+        // Clearer Validation Checks with redirectWithError
+        if ($id <= 0) redirectWithError("Invalid user ID provided for editing.", '#modalAdd');
+        if (!required('name')) redirectWithError("Please enter the user's Full Name.", '#modalAdd');
+        if (!required('username')) redirectWithError("Please enter a Username.", '#modalAdd');
+        if (!required('role')) redirectWithError("Please select a Role for the user.", '#modalAdd');
+        if (!required('status')) redirectWithError("Please select a Status for the user.", '#modalAdd');
+
         $edit_username = trim($_POST['username']);
-        $edit_name = trim($_POST['name']);
+        $edit_name = strtoupper(trim($_POST['name'])); // Save uppercase
         $edit_role = trim($_POST['role']);
         $edit_status = trim($_POST['status']);
 
-        // Check if username exists for another user
-  $check_stmt = $conn->prepare("SELECT user_id FROM users WHERE username = ? AND user_id != ?");
-  $check_stmt->bind_param("si", $edit_username, $id);
-        $check_stmt->execute();
-        $check_result = $check_stmt->get_result();
+        // --- NEW: Check if any changes were actually made ---
+        $orig_stmt = $conn->prepare("SELECT name, username, role, status FROM users WHERE user_id = ?");
+        if (!$orig_stmt) redirectWithError("Database error: Could not retrieve original user data.", '#modalAdd');
+        
+        $orig_stmt->bind_param("i", $id);
+        if (!$orig_stmt->execute()) {
+             $orig_stmt->close();
+             redirectWithError("Database error: Failed to retrieve original user data.", '#modalAdd');
+        }
+        
+        $orig_result = $orig_stmt->get_result();
+        $original_data = $orig_result->fetch_assoc();
+        $orig_stmt->close();
 
-        if ($check_result->num_rows > 0) {
-             $_SESSION['error_message'] = "Username already exists for another user.";
+        if (!$original_data) {
+             redirectWithError("User not found. They may have been deleted.", '#modalAdd');
+        }
+
+        // Compare original (uppercase name) with new submitted data (uppercase name)
+        if ($original_data['name'] === $edit_name &&
+            $original_data['username'] === $edit_username &&
+            $original_data['role'] === $edit_role &&
+            $original_data['status'] === $edit_status) 
+        {
+            // No changes detected, redirect back with info message
+            redirectWithError("No changes were detected. Please modify the details before saving.", '#modalAdd');
+        }
+        // --- End of "No Changes" check ---
+
+
+        // Check if username exists for ANOTHER user
+        $check_stmt = $conn->prepare("SELECT user_id FROM users WHERE username = ? AND user_id != ?");
+         if (!$check_stmt) redirectWithError("Database error: Could not check username uniqueness.", '#modalAdd');
+
+        $check_stmt->bind_param("si", $edit_username, $id);
+        if (!$check_stmt->execute()) {
+             $check_stmt->close();
+             redirectWithError("Database error: Failed to execute username check.", '#modalAdd');
+        }
+        
+        $check_result = $check_stmt->get_result();
+        $username_taken = $check_result->num_rows > 0;
+        $check_stmt->close();
+
+        if ($username_taken) {
+            redirectWithError("Username '$edit_username' already exists for another user. Please choose a different username.", '#modalAdd');
         } else {
             // Update user details
             $stmt = $conn->prepare("UPDATE users SET username = ?, name = ?, role = ?, status = ? WHERE user_id = ?");
             if ($stmt) {
                 $stmt->bind_param("ssssi", $edit_username, $edit_name, $edit_role, $edit_status, $id);
-                 if($stmt->execute()){
-                     $_SESSION['success_message'] = "User updated successfully.";
-                     // *** ADDED: Update session name if editing own profile ***
-                     if ($id === $current_user_id) {
-                         $_SESSION['name'] = $edit_name; // Update the session immediately
-                     }
-                     // *******************************************************
+                if($stmt->execute()){
+                    $_SESSION['success_message'] = "User '$edit_username' updated successfully.";
+                    // Update session name if editing own profile
+                    if ($id === $current_user_id) {
+                        $_SESSION['name'] = $edit_name; // Update session (already uppercase)
+                    }
                 } else {
-                     $_SESSION['error_message'] = "Error updating user: " . $stmt->error;
+                    // User-friendly error
+                     redirectWithError("Could not update user '$edit_username'. Please check the data and try again.", '#modalAdd');
                 }
                 $stmt->close();
             } else {
-                 $_SESSION['error_message'] = "Database error preparing statement: " . $conn->error;
+                // User-friendly error
+                 redirectWithError("A database error occurred while preparing the update. Please try again.", '#modalAdd');
             }
         }
-        $check_stmt->close();
-        header("Location: users.php"); exit();
-
-    } elseif ($action === 'delete') {
+    } 
+    elseif ($action === 'delete') {
         $id = intval($_POST['id'] ?? 0);
-        // Prevent deleting the currently logged-in user
-        if ($id > 0 && $id !== $current_user_id) {
+        
+        if ($id <= 0) {
+             $_SESSION['error_message'] = "Invalid user ID provided for deletion.";
+        } elseif ($id === $current_user_id) {
+            $_SESSION['error_message'] = "Operation denied: You cannot delete your own account.";
+        } else {
             $stmt = $conn->prepare("DELETE FROM users WHERE user_id = ?");
             if ($stmt) {
                 $stmt->bind_param("i", $id);
                 if($stmt->execute()){
-                     $_SESSION['success_message'] = "User deleted successfully.";
+                    $_SESSION['success_message'] = "User deleted successfully.";
                 } else {
-                     $_SESSION['error_message'] = "Error deleting user: " . $stmt->error;
+                    // User-friendly error
+                    $_SESSION['error_message'] = "Could not delete user. They might be linked to other records or protected.";
                 }
                 $stmt->close();
             } else {
-                 $_SESSION['error_message'] = "Database error preparing statement: " . $conn->error;
+                // User-friendly error
+                $_SESSION['error_message'] = "A database error occurred while preparing to delete. Please try again.";
             }
-        } elseif ($id === $current_user_id) {
-            $_SESSION['error_message'] = "You cannot delete your own account.";
-        } else {
-            $_SESSION['error_message'] = "Invalid user ID for deletion.";
         }
-        header("Location: users.php"); exit();
     }
+    
+    // Default redirect if action was successful or not handled above
+    header("Location: users.php"); 
+    exit();
 }
+
+// --- NEW: Check for saved form data from a previous error ---
+$form_data = $_SESSION['form_data'] ?? [];
+$open_modal = $_SESSION['open_modal'] ?? null;
+unset($_SESSION['form_data'], $_SESSION['open_modal']);
+
 
 // Fetch users data for display
 $users_q = $conn->query("
@@ -246,10 +328,17 @@ $users_q = $conn->query("
     ORDER BY created_at DESC
 ");
 
-// Get potential feedback messages from session
+// Get potential feedback messages from session (error might be set by redirectWithError)
 $error_message = $_SESSION['error_message'] ?? null;
 $success_message = $_SESSION['success_message'] ?? null;
-unset($_SESSION['error_message'], $_SESSION['success_message']); // Clear messages after reading
+// Clear messages AFTER reading them into variables
+unset($_SESSION['error_message'], $_SESSION['success_message']); 
+
+// Check for main query failure AFTER checking session errors
+if ($users_q === false && !$error_message) {
+    // Only set this if no other error is pending
+    $error_message = "Critical Error: Could not load user data from the database. Please refresh the page or contact support.";
+}
 
 ?>
 <!doctype html>
@@ -261,6 +350,7 @@ unset($_SESSION['error_message'], $_SESSION['success_message']); // Clear messag
 <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
 <style>
+/* --- CSS Remains the same as previous version --- */
 :root {
   --accent:#d84c73; --accent-light:#ffb6c1; --bg1:#fff0f6; --bg2:#ffe6ee; --card:#fff;
   --muted:#6b4a57; --shadow:0 8px 25px rgba(216,76,115,0.1);
@@ -286,15 +376,12 @@ nav.side-menu a:hover i { transform: scale(1.1); }
 .user-info{font-size:14px;font-weight:600;background:var(--card);padding:10px 14px;border-radius:10px;box-shadow:var(--shadow)}
 .toolbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:18px;background:var(--card);padding:14px 16px;border-radius:12px;box-shadow:var(--shadow)}
 .toolbar input{padding:8px 12px;border-radius:8px;border:1px solid #ccc;width:220px}
-
-/* Global Button Styles */
 .btn{ border: none; border-radius: 8px; padding: 10px 18px; font-weight: 600; cursor: pointer; transition: all 0.25s ease; background: var(--accent-light); color: var(--accent-dark); margin: 0 5px; font-family:"Poppins",sans-serif; font-size: 14px;}
 .btn:hover { background: var(--accent); color: #fff; transform: translateY(-2px); box-shadow: 0 4px 15px rgba(216,76,115,0.2);}
 .btn.primary{ background:var(--accent); color:#fff;}
 .btn.primary:hover{ background: var(--accent-dark); transform:translateY(-2px); box-shadow: 0 4px 15px rgba(216,76,115,0.3);}
 .btn.small{padding:8px 12px;font-size:13px}
 .btn i { margin-right: 8px; }
-
 .table-card{background:var(--card);border-radius:14px;padding:16px;box-shadow:var(--shadow);overflow-x:auto}
 table{width:100%;border-collapse:collapse;text-align:left; font-size: 13px;}
 th,td{padding:10px 12px;border-bottom:1px solid #f3d0dc; white-space: nowrap;}
@@ -306,8 +393,6 @@ tr:hover{background:#fff6f9}
 .pagination{text-align:center;margin-top:18px;display:flex;justify-content:center;gap:6px;flex-wrap:wrap}
 .pagination button{border:none;background:var(--accent);color:#fff;padding:6px 12px;border-radius:6px;cursor:pointer; font-size: 13px;}
 .pagination button.active{background:#ff91a4}
-
-/* Modal Styles */
 .modal { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.5); display: none; justify-content: center; align-items: center; z-index: 1000; backdrop-filter: blur(5px); padding: 15px;}
 .modal.active { display: flex; animation: fadeIn .3s ease; }
 .modal-content { background: var(--card); border-radius: 16px; padding: 30px; width: 450px; max-width: 95%; box-shadow: 0 10px 40px rgba(0,0,0,0.15); animation: slideUp .35s ease; position: relative; }
@@ -318,12 +403,8 @@ tr:hover{background:#fff6f9}
 .modal .actions { display: flex; justify-content: flex-end; margin-top: 25px; gap: 10px; }
 @keyframes fadeIn { from { opacity: 0; transform: scale(0.95); } to { opacity: 1; transform: scale(1); } }
 @keyframes slideUp { from { transform: translateY(15px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
-
-/* Style for password field shown only on add */
-.password-field { display: block; } /* Default visible */
-form[data-mode="edit"] .password-field { display: none; } /* Hide in edit mode */
-
-/* Status styling */
+.password-field { display: block; }
+form[data-mode="edit"] .password-field { display: none; }
 .status-active { color: var(--success); font-weight: 700; }
 .status-inactive { color: var(--danger); font-weight: 700; }
 </style>
@@ -335,7 +416,7 @@ form[data-mode="edit"] .password-field { display: none; } /* Hide in edit mode *
     <a href="dashboard.php"><i class="fa fa-chart-pie"></i><span class="label">Dashboard</span></a>
     <?php endif; ?>
     <a href="transactions/collections.php"><i class="fa fa-cash-register"></i><span class="label">Transactions</span></a>
-    <?php if ($current_role === 'admin'): // Use variable already defined ?>
+    <?php if ($current_role === 'admin'): ?>
     <a href="users.php" class="active"><i class="fa fa-users-cog"></i><span class="label">Users</span></a>
     <?php endif; ?>
     <a href="logout.php"><i class="fa fa-sign-out-alt"></i><span class="label">Logout</span></a>
@@ -370,27 +451,33 @@ form[data-mode="edit"] .password-field { display: none; } /* Hide in edit mode *
         </tr>
       </thead>
       <tbody>
-        <?php while ($r = $users_q->fetch_assoc()):
-            // Encode the full row data, including the name, for JavaScript
-            $data = htmlentities(json_encode($r), ENT_QUOTES, 'UTF-8');
-            $status_text = ucfirst($r['status']);
-            $status_class = $r['status'] === 'active' ? 'status-active' : 'status-inactive';
-            $date_formatted = !empty($r['date_created_only']) ? date('M d, Y', strtotime($r['date_created_only'])) : '';
+        <?php
+        if ($users_q):
+            while ($r = $users_q->fetch_assoc()):
+                $data = htmlentities(json_encode($r), ENT_QUOTES, 'UTF-8');
+                $status_text = ucfirst($r['status']);
+                $status_class = $r['status'] === 'active' ? 'status-active' : 'status-inactive';
+                $date_formatted = !empty($r['date_created_only']) ? date('M d, Y', strtotime($r['date_created_only'])) : '';
         ?>
           <tr data-row='<?= $data ?>'>
-            <td><?= htmlspecialchars($r['name']) ?></td>
+            <td><?= htmlspecialchars(strtoupper($r['name'])) ?></td>
             <td><?= htmlspecialchars($r['username']) ?></td>
             <td><?= htmlspecialchars(ucfirst($r['role'])) ?></td>
             <td><span class="<?= $status_class ?>"><?= htmlspecialchars($status_text) ?></span></td>
             <td><?= $date_formatted ?></td>
             <td>
               <button class="icon-btn editBtn" title="Edit"><i class="fa fa-pen"></i></button>
-              <?php if ($r['user_id'] !== $current_user_id): // Check against current user ID ?>
+              <?php if ($r['user_id'] !== $current_user_id): ?>
                 <button class="icon-btn deleteBtn" title="Delete"><i class="fa fa-trash"></i></button>
               <?php endif; ?>
             </td>
           </tr>
-        <?php endwhile; ?>
+        <?php 
+            endwhile;
+        else: 
+        ?>
+            <tr><td colspan="6" style="text-align:center;color:var(--danger);">Could not load user data. An error occurred.</td></tr>
+        <?php endif; ?>
       </tbody>
     </table>
     <div class="pagination" id="pagination"></div>
@@ -400,32 +487,35 @@ form[data-mode="edit"] .password-field { display: none; } /* Hide in edit mode *
 <div class="modal" id="modalAdd">
   <div class="modal-content">
     <h2 id="addTitle">New User</h2>
-    <form method="post" id="formAdd" action="users.php" data-mode="add">
-      <input type="hidden" name="action" id="formAddAction" value="add">
-      <input type="hidden" name="id" id="formAddId" value="">
+    <form method="post" id="formAdd" action="users.php" data-mode="<?= htmlspecialchars($form_data['action'] ?? 'add') ?>">
+      <input type="hidden" name="action" id="formAddAction" value="<?= htmlspecialchars($form_data['action'] ?? 'add') ?>">
+      <input type="hidden" name="id" id="formAddId" value="<?= htmlspecialchars($form_data['id'] ?? '') ?>">
 
       <label>Full Name</label>
-      <input type="text" name="name" id="name" required>
+      <input type="text" name="name" id="name" required value="<?= htmlspecialchars($form_data['name'] ?? '') ?>">
 
       <label>Username</label>
-      <input type="text" name="username" id="username" required>
+      <input type="text" name="username" id="username" required value="<?= htmlspecialchars($form_data['username'] ?? '') ?>">
 
       <div class="password-field">
           <label>Password</label>
-          <input type="password" name="password" id="password"> </div>
+          <input type="password" name="password" id="password"> 
+      </div>
 
       <label>Role</label>
       <select name="role" id="role" required>
         <option value="">-- Select Role --</option>
-        <option value="user">User</option>
-        <option value="admin">Admin</option>
+        <?php $selected_role = $form_data['role'] ?? ''; ?>
+        <option value="user" <?= $selected_role === 'user' ? 'selected' : '' ?>>User</option>
+        <option value="admin" <?= $selected_role === 'admin' ? 'selected' : '' ?>>Admin</option>
       </select>
 
       <label>Status</label>
       <select name="status" id="status" required>
-         <option value="">-- Select Status --</option>
-        <option value="active">Active</option>
-        <option value="inactive">Inactive</option>
+        <option value="">-- Select Status --</option>
+        <?php $selected_status = $form_data['status'] ?? ''; ?>
+        <option value="active" <?= $selected_status === 'active' ? 'selected' : '' ?>>Active</option>
+        <option value="inactive" <?= $selected_status === 'inactive' ? 'selected' : '' ?>>Inactive</option>
       </select>
 
       <div class="actions">
@@ -443,10 +533,15 @@ form[data-mode="edit"] .password-field { display: none; } /* Hide in edit mode *
 </form>
 
 <script>
+  const FPDF_MISSING = <?= defined('FPDF_MISSING') ? 'true' : 'false' ?>;
+  const MODAL_TO_OPEN = '<?= $open_modal ?? '' ?>'; // Tells JS which modal to reopen on error
+</script>
+
+<script>
 /* DOM helpers & initial state */
 const searchInput = document.getElementById('searchInput');
 const rowsPerPageInput = document.getElementById('rowsPerPageInput');
-const allRows = Array.from(document.querySelectorAll('#usersTable tbody tr'));
+const allRows = Array.from(document.querySelectorAll('#usersTable tbody tr[data-row]'));
 const generatePdfBtn = document.getElementById('generatePdfBtn');
 const pdfForm = document.getElementById('pdfForm');
 const pdfDataInput = document.getElementById('pdfDataInput');
@@ -464,14 +559,20 @@ const openAddBtn = document.getElementById('openAddBtn');
 const closeAdd = document.getElementById('closeAdd');
 const addTitle = document.getElementById('addTitle');
 const passwordInput = document.getElementById('password');
-const nameInput = document.getElementById('name'); // Get name input
+const nameInput = document.getElementById('name');
+const usernameInput = document.getElementById('username'); // Get username input
+const roleSelect = document.getElementById('role');
+const statusSelect = document.getElementById('status');
+const formActionInput = document.getElementById('formAddAction');
+const formIdInput = document.getElementById('formAddId');
+
 
 openAddBtn.onclick = () => {
   formAdd.reset();
-  formAdd.dataset.mode = 'add'; // Set mode for validation
-  passwordInput.required = true; // Password required for adding
-  document.getElementById('formAddAction').value = 'add';
-  document.getElementById('formAddId').value = '';
+  formAdd.dataset.mode = 'add'; 
+  passwordInput.required = true; 
+  formActionInput.value = 'add';
+  formIdInput.value = '';
   addTitle.textContent = 'New User';
   modalAdd.classList.add('active');
 };
@@ -480,17 +581,18 @@ closeAdd.onclick = () => modalAdd.classList.remove('active');
 
 document.querySelectorAll('.editBtn').forEach(btn=>{
   btn.onclick = (e)=>{
-  const tr = btn.closest('tr');
-  const data = JSON.parse(tr.dataset.row); // This now contains the 'name' and user_id
-  formAdd.reset();
-  formAdd.dataset.mode = 'edit'; // Set mode for validation
-  passwordInput.required = false; // Password not required for editing
-  document.getElementById('formAddAction').value = 'edit';
-  document.getElementById('formAddId').value = data.user_id;
-  nameInput.value = data.name || ''; // Populate name field from data
-    document.getElementById('username').value = data.username;
-    document.getElementById('role').value = data.role;
-    document.getElementById('status').value = data.status;
+    // Clear form first, in case it was repopulated from an error
+    formAdd.reset(); 
+    const tr = btn.closest('tr');
+    const data = JSON.parse(tr.dataset.row); 
+    formAdd.dataset.mode = 'edit'; 
+    passwordInput.required = false; 
+    formActionInput.value = 'edit';
+    formIdInput.value = data.user_id;
+    nameInput.value = data.name || ''; // Populate from original data
+    usernameInput.value = data.username;
+    roleSelect.value = data.role;
+    statusSelect.value = data.status;
     addTitle.textContent = 'Edit User';
     modalAdd.classList.add('active');
   }
@@ -500,35 +602,35 @@ document.querySelectorAll('.editBtn').forEach(btn=>{
 /* Delete - SweetAlert */
 document.querySelectorAll('.deleteBtn').forEach(btn=>{
   btn.onclick = ()=>{
-  const data = JSON.parse(btn.closest('tr').dataset.row);
-  const id = Number(data.user_id);
-    // Get current user ID from PHP session variable embedded in JS
+    const data = JSON.parse(btn.closest('tr').dataset.row);
+    const id = Number(data.user_id);
     const currentUserId = <?= $current_user_id ?>;
 
     if (id === currentUserId) {
-         Swal.fire({ icon: 'error', title: 'Action Denied', text: 'You cannot delete your own account.', buttonsStyling: false, customClass: { confirmButton: 'btn primary' } });
-         return; // Stop execution
+         Swal.fire({ 
+             icon: 'error', 
+             title: 'Action Denied', 
+             text: 'You cannot delete your own account.', 
+             buttonsStyling: false, customClass: { confirmButton: 'btn primary' } 
+         });
+         return; 
     }
 
     Swal.fire({
         title: 'Are you sure?',
-        text: `Delete user: ${data.username}? This cannot be undone.`,
+        text: `Delete user '${data.username}'? This cannot be undone.`, // Clearer text
         icon: 'warning',
         showCancelButton: true,
         confirmButtonText: 'Yes, delete it!',
-        cancelButtonText: 'Cancel', // Added cancel text
+        cancelButtonText: 'Cancel', 
         buttonsStyling: false,
-        customClass: { confirmButton: 'btn primary', cancelButton: 'btn' } // Apply button styles
+        customClass: { confirmButton: 'btn primary', cancelButton: 'btn' } 
     }).then((result) => {
         if (result.isConfirmed) {
-            // Use a form submission for delete for simplicity and consistency
             const deleteForm = document.createElement('form');
             deleteForm.method = 'POST';
             deleteForm.action = 'users.php';
-      deleteForm.innerHTML = `
-        <input type="hidden" name="action" value="delete">
-        <input type="hidden" name="id" value="${id}">
-      `;
+            deleteForm.innerHTML = `<input type="hidden" name="action" value="delete"><input type="hidden" name="id" value="${id}">`;
             document.body.appendChild(deleteForm);
             deleteForm.submit();
         }
@@ -536,189 +638,136 @@ document.querySelectorAll('.deleteBtn').forEach(btn=>{
   }
 });
 
-/* --- Filter, Sort, Pagination --- */
+/* --- Filter, Sort, Pagination --- (No changes needed) */
+function getFilteredRows() { const q = searchInput.value.toLowerCase().trim(); return allRows.filter(r => { const tc = r.textContent.toLowerCase(); return !q || tc.includes(q); }); }
+function sortRows(rowsToSort, key, asc) { rowsToSort.sort((a, b) => { const A_data = JSON.parse(a.dataset.row); const B_data = JSON.parse(b.dataset.row); let A = A_data[key]; let B = B_data[key]; if (key === 'date_created_only') { A = A_data['created_at'] || 0; B = B_data['created_at'] || 0; const dateA = new Date(A); const dateB = new Date(B); return asc ? dateA - dateB : dateB - dateA; } const sa = (A || '').toString().toLowerCase(); const sb = (B || '').toString().toLowerCase(); return asc ? sa.localeCompare(sb) : sb.localeCompare(sa); }); }
+function renderTable() { const fr = getFilteredRows(); sortRows(fr, currentSortKey, currentSortAsc); const tbody = document.querySelector('#usersTable tbody'); tbody.innerHTML = ''; const start = (currentPage - 1) * rowsPerPage; const end = start + rowsPerPage; const pageRows = fr.slice(start, end); if (pageRows.length === 0 && allRows.length > 0) { tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;">No users found matching your search.</td></tr>'; } else if (allRows.length === 0 && <?= $users_q ? 'true' : 'false' ?>) { tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;">No users have been added yet.</td></tr>'; } else { pageRows.forEach(r => { tbody.appendChild(r); }); } renderPagination(fr.length); }
+function renderPagination(total) { const container = document.getElementById('pagination'); container.innerHTML = ''; const totalPages = Math.max(1, Math.ceil(total / rowsPerPage)); if (totalPages <= 1) return; for (let i = 1; i <= totalPages; i++) { const b = document.createElement('button'); b.textContent = i; if (i === currentPage) b.classList.add('active'); b.onclick = () => { currentPage = i; renderTable(); }; container.appendChild(b); } }
 
-function getFilteredRows() {
-  const q = searchInput.value.toLowerCase().trim();
-  return allRows.filter(r => {
-      const textContent = r.textContent.toLowerCase();
-      return !q || textContent.includes(q);
-  });
-}
-
-function sortRows(rowsToSort, key, asc) {
-    rowsToSort.sort((a, b) => {
-      const A_data = JSON.parse(a.dataset.row);
-      const B_data = JSON.parse(b.dataset.row);
-      let A = A_data[key]; // Use let for potential modification
-      let B = B_data[key];
-
-      // Handle date sorting using the full timestamp
-      if (key === 'date_created_only') {
-          A = A_data['created_at'] || 0; // Use full timestamp
-          B = B_data['created_at'] || 0;
-          const dateA = new Date(A);
-          const dateB = new Date(B);
-          return asc ? dateA - dateB : dateB - dateA;
-      }
-      
-      // Default string comparison (case-insensitive)
-      const sa = (A || '').toString().toLowerCase();
-      const sb = (B || '').toString().toLowerCase();
-      return asc ? sa.localeCompare(sb) : sb.localeCompare(sa);
-    });
-}
-
-function renderTable() {
-    const filteredRows = getFilteredRows();
-    sortRows(filteredRows, currentSortKey, currentSortAsc);
-    const tbody = document.querySelector('#usersTable tbody');
-    tbody.innerHTML = ''; // Clear existing rows
-    const start = (currentPage - 1) * rowsPerPage;
-    const end = start + rowsPerPage;
-    const pageRows = filteredRows.slice(start, end);
-    // No need to hide all rows if tbody is cleared
-    pageRows.forEach(r => {
-        // r.style.display = ''; // No longer needed
-        tbody.appendChild(r);
-    });
-    renderPagination(filteredRows.length);
-}
-
-function renderPagination(totalFilteredRows) {
-  const container = document.getElementById('pagination');
-  container.innerHTML = ''; // Clear existing pagination
-  const totalPages = Math.max(1, Math.ceil(totalFilteredRows / rowsPerPage));
-  if (totalPages <= 1) return; // No pagination needed for 1 page or less
-
-  for (let i = 1; i <= totalPages; i++) {
-    const b = document.createElement('button');
-    b.textContent = i;
-    if (i === currentPage) b.classList.add('active');
-    b.onclick = () => { currentPage = i; renderTable(); };
-    container.appendChild(b);
-  }
-}
-
-/* --- Event Listeners --- */
+/* --- Event Listeners --- (No changes needed for filter/sort/pagination) */
 searchInput.addEventListener('input', () => { currentPage = 1; renderTable(); });
-rowsPerPageInput.addEventListener('change', () => {
-    let newRows = parseInt(rowsPerPageInput.value);
-    if (newRows > 0) {
-        rowsPerPage = newRows;
-    } else {
-        rowsPerPageInput.value = rowsPerPage; // Reset input if invalid
-    }
-    currentPage = 1;
-    renderTable();
-});
+rowsPerPageInput.addEventListener('change', () => { let newRows = parseInt(rowsPerPageInput.value); if (newRows > 0) { rowsPerPage = newRows; } else { rowsPerPageInput.value = rowsPerPage; } currentPage = 1; renderTable(); });
+document.querySelectorAll('th[data-key]').forEach(th => { th.addEventListener('click', () => { const key = th.dataset.key; if (currentSortKey === key) { currentSortAsc = !currentSortAsc; } else { currentSortKey = key; currentSortAsc = true; } document.querySelectorAll('#usersTable th .sort-icon').forEach(i => i.className = 'fa fa-sort sort-icon'); th.querySelector('.sort-icon').className = currentSortAsc ? 'fa fa-sort-up sort-icon' : 'fa fa-sort-down sort-icon'; currentPage = 1; renderTable(); }); });
 
-document.querySelectorAll('th[data-key]').forEach(th => {
-  th.addEventListener('click', () => {
-    const key = th.dataset.key;
-    if (currentSortKey === key) {
-        currentSortAsc = !currentSortAsc; // Toggle direction
-    } else {
-        currentSortKey = key; // Set new key
-        currentSortAsc = true; // Default to ascending
-    }
-    // Update icons visually
-    document.querySelectorAll('#usersTable th .sort-icon').forEach(i => i.className = 'fa fa-sort sort-icon'); // Reset others
-    th.querySelector('.sort-icon').className = currentSortAsc ? 'fa fa-sort-up sort-icon' : 'fa fa-sort-down sort-icon'; // Set current
-
-    currentPage = 1; // Reset to first page on sort
-    renderTable();
-  });
-});
-
-/* PDF Generation Button Listener */
+/* PDF Generation Button Listener - Updated FPDF Check */
 generatePdfBtn.addEventListener('click', () => {
-    const filteredAndSortedRows = getFilteredRows(); // Get all currently filtered rows
-    sortRows(filteredAndSortedRows, currentSortKey, currentSortAsc); // Ensure they are sorted
-
-    const dataForPdf = filteredAndSortedRows.map(row => {
-        const cells = row.getElementsByTagName('td');
-        // Extract text content from table cells to match display
-        return {
-            name: cells[0]?.textContent || '',
-            username: cells[1]?.textContent || '',
-            role: cells[2]?.textContent || '',
-            status: cells[3]?.textContent || '',
-            date: cells[4]?.textContent || ''
-        };
-    });
-    const filtersForPdf = {
-        search: searchInput.value,
-        sortKey: currentSortKey,
-        sortAsc: currentSortAsc
-    };
-
+    if (typeof FPDF_MISSING !== 'undefined' && FPDF_MISSING) {
+        Swal.fire({
+            icon: 'error', title: 'PDF Error',
+            text: 'The PDF library needed for report generation is missing on the server. Please contact the administrator.',
+            buttonsStyling: false, customClass: { confirmButton: 'btn primary' }
+        });
+        return; 
+    }
+    const filteredAndSortedRows = getFilteredRows(); 
+    sortRows(filteredAndSortedRows, currentSortKey, currentSortAsc); 
+    const dataForPdf = filteredAndSortedRows.map(row => { const cells = row.getElementsByTagName('td'); return { name: cells[0]?.textContent || '', username: cells[1]?.textContent || '', role: cells[2]?.textContent || '', status: cells[3]?.textContent || '', date: cells[4]?.textContent || '' }; });
+    const filtersForPdf = { search: searchInput.value, sortKey: currentSortKey, sortAsc: currentSortAsc };
     pdfDataInput.value = JSON.stringify(dataForPdf);
     pdfFiltersInput.value = JSON.stringify(filtersForPdf);
-    pdfForm.submit(); // Submit the hidden form
+    pdfForm.submit(); 
 });
 
 /* --- Form Validation & Modal Close --- */
-renderTable(); // Initial render on page load
+renderTable(); // Initial render
 
+// --- MODIFIED: Added Edit Confirmation ---
 formAdd.addEventListener('submit', function(e){
-  // Trim values and get mode
   const name = nameInput.value.trim();
-  const username = document.getElementById('username').value.trim();
-  const password = passwordInput.value; // Don't trim password
-  const role = document.getElementById('role').value;
-  const status = document.getElementById('status').value;
-  const mode = formAdd.dataset.mode; // 'add' or 'edit'
+  const username = usernameInput.value.trim();
+  const password = passwordInput.value;
+  const role = roleSelect.value;
+  const status = statusSelect.value;
+  const mode = formAdd.dataset.mode;
   let errorMessage = '';
 
-  // Basic Validations
-  if (!name) { errorMessage = 'Please provide a full name.'; }
-  else if (!username) { errorMessage = 'Please provide a username.'; }
-  // Password validation only needed when adding
+  // Client-side basic validation
+  if (!name) { errorMessage = 'Please provide the Full Name.'; }
+  else if (!username) { errorMessage = 'Please provide a Username.'; }
   else if (mode === 'add' && (!password || password.length < 6)) {
-      errorMessage = 'Please provide a password (at least 6 characters).';
+      errorMessage = 'Please provide a Password (at least 6 characters).';
   }
-  else if (!role) { errorMessage = 'Please select a role.'; }
-  else if (!status) { errorMessage = 'Please select a status.'; }
+  else if (!role) { errorMessage = 'Please select a Role.'; }
+  else if (!status) { errorMessage = 'Please select a Status.'; }
 
-  // If validation fails, prevent submission and show error
   if (errorMessage) {
-      e.preventDefault(); // Stop form submission
+      e.preventDefault(); 
       Swal.fire({
-          icon: 'error',
-          title: 'Validation Error',
+          icon: 'warning', // Use warning for validation
+          title: 'Missing Information',
           text: errorMessage,
           buttonsStyling: false,
           customClass: { confirmButton: 'btn primary' }
       });
-      return false; // Indicate failure
+      return false; 
   }
-  // Allow form submission if validation passes
+
+  // --- NEW: Confirmation Step for Edit Mode ---
+  if (mode === 'edit') {
+      e.preventDefault(); // Prevent normal submission for edit
+      Swal.fire({
+          title: 'Confirm Update',
+          text: `Are you sure you want to save the changes for user '${username}'?`,
+          icon: 'question',
+          showCancelButton: true,
+          confirmButtonText: 'Yes, update it!',
+          cancelButtonText: 'Cancel',
+          buttonsStyling: false,
+          customClass: { confirmButton: 'btn primary', cancelButton: 'btn' }
+      }).then((result) => {
+          if (result.isConfirmed) {
+              // If confirmed, *then* submit the form programmatically
+              formAdd.submit(); 
+          }
+          // If cancelled, do nothing, modal stays open
+      });
+  } 
+  // If mode is 'add', allow the default form submission to proceed
 });
 
 // Close modal if clicking outside content
 document.querySelectorAll('.modal').forEach(m=>{
   m.addEventListener('click', (ev)=>{
-      if (ev.target === m) { // Check if click is on the backdrop
+      if (ev.target === m) { 
           m.classList.remove('active');
       }
   });
 });
 
-// Display feedback messages from PHP using SweetAlert
+// Display feedback messages from PHP using SweetAlert & Handle Modal Reopen
 document.addEventListener('DOMContentLoaded', () => {
+    // Show feedback messages
     <?php if ($success_message): ?>
         Swal.fire({
-            icon: 'success', title: 'Success', text: '<?= addslashes($success_message) ?>',
-            timer: 2000, showConfirmButton: false
+            icon: 'success', title: 'Success!', text: '<?= addslashes($success_message) ?>',
+            timer: 2500, showConfirmButton: false // Auto-close success
         });
     <?php elseif ($error_message): ?>
         Swal.fire({
-             icon: 'error', title: 'Error', text: '<?= addslashes($error_message) ?>',
+             icon: 'error', title: 'Oops! An Error Occurred', text: '<?= addslashes($error_message) ?>',
              confirmButtonText: 'OK', buttonsStyling: false,
              customClass: { confirmButton: 'btn primary' }
          });
     <?php endif; ?>
+
+    // --- NEW: Check if PHP told us to re-open a modal after an error ---
+    if (MODAL_TO_OPEN) {
+        const modalToOpen = document.querySelector(MODAL_TO_OPEN);
+        if (modalToOpen) {
+            // Determine title based on the action stored in the hidden input (repopulated by PHP)
+            const action = formActionInput.value; 
+            if (action === 'edit') {
+                addTitle.textContent = 'Edit User';
+                formAdd.dataset.mode = 'edit'; // Ensure mode is correct
+                passwordInput.required = false;
+            } else {
+                addTitle.textContent = 'New User';
+                 formAdd.dataset.mode = 'add'; // Ensure mode is correct
+                 passwordInput.required = true;
+            }
+            modalToOpen.classList.add('active');
+        }
+    }
 });
 
 </script>

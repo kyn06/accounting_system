@@ -1,5 +1,12 @@
 <?php
+// transactions/collections.php
 session_start();
+
+// Prevent browser caching
+header("Cache-Control: no-store, no-cache, must-revalidate, max-age=0");
+header("Pragma: no-cache");
+header("Expires: 0"); // Expire immediately
+
 require_once '../db.php';
 // --- Include FPDF ---
 $fpdf_path = __DIR__ . '/../fpdf/fpdf.php';
@@ -15,14 +22,17 @@ if (!isset($_SESSION['user_id'])) {
     exit();
 }
 
-$current_display_name = $_SESSION['name'] ?? $_SESSION['username'] ?? 'User';
+// MODIFIED: Ensure display name is uppercase for consistency
+$current_display_name = strtoupper($_SESSION['name'] ?? $_SESSION['username'] ?? 'User');
 $role = $_SESSION['role'] ?? 'user';
+$is_admin = ($_SESSION['role'] === 'admin');
 
 // --- Enhanced FPDF Class (Keep as before) ---
 class PDF extends FPDF {
     private $reportTitle = 'Report'; private $periodLabel = ''; private $generatedBy = '';
     private $colorAccent = [216, 76, 115]; private $colorLightPink = [255, 240, 246]; private $colorMuted = [107, 74, 87]; private $colorDark = [61, 26, 42]; private $colorBorder = [243, 208, 220];
     function setReportHeader($title, $period, $user) {
+        // User is already uppercase from $current_display_name
         if (function_exists('iconv')) {
             $this->reportTitle = @iconv('UTF-8', 'cp1252//IGNORE', $title) ?: $title;
             $this->periodLabel = @iconv('UTF-8', 'cp1252//IGNORE', $period) ?: $period;
@@ -36,12 +46,16 @@ class PDF extends FPDF {
             $this->SetFillColor($fill ? 245 : 255);
             for ($i = 0; $i < count($header); $i++) {
                 $cellValue = $row[$i] ?? '';
+                // Client (idx 1) and In-Charge (idx 8) are already uppercase from JS
                 if (function_exists('iconv') && mb_detect_encoding((string)$cellValue, 'UTF-8', true) && preg_match('/[^\x00-\x7F]/', (string)$cellValue)) {
-                     $convertedValue = @iconv('UTF-8', 'cp1252//IGNORE', (string)$cellValue);
-                     if ($convertedValue !== false) { $cellValue = $convertedValue; }
+                    $convertedValue = @iconv('UTF-8', 'cp1252//IGNORE', (string)$cellValue);
+                    if ($convertedValue !== false) { $cellValue = $convertedValue; }
                 }
                 $cleanValue = str_replace(['₱', ',', ' '], '', (string)$cellValue);
-                $align = (is_numeric($cleanValue)) ? 'R' : 'L';
+                // MODIFIED: Align right if numeric OR starts with ₱
+                $align = (is_numeric($cleanValue) || strpos(trim((string)$cellValue), '₱') === 0) ? 'R' : 'L';
+                if ($header[$i] === 'Mode') $align = 'C'; // Center Mode
+                
                 $this->Cell($widths[$i], 6, (string)$cellValue, 'LR', 0, $align, true);
             }
             $this->Ln();
@@ -49,17 +63,17 @@ class PDF extends FPDF {
         }
         $this->Cell(array_sum($widths), 0, '', 'T'); $this->Ln(4);
     }
-     function CalculateWidths($header, $data) {
+    function CalculateWidths($header, $data) {
         $num_cols = count($header);
         $pageWidth = $this->GetPageWidth() - $this->lMargin - $this->rMargin; // Use margins
         $widths = [];
         for ($i = 0; $i < $num_cols; $i++) { $widths[$i] = $this->GetStringWidth($header[$i]) + 6; }
         $sampleData = array_slice($data, 0, 30);
         foreach ($sampleData as $row) {
-             if (!is_array($row)) continue;
+            if (!is_array($row)) continue;
             for ($i = 0; $i < $num_cols; $i++) {
                 $cellValue = $row[$i] ?? '';
-                 if (function_exists('iconv') && mb_detect_encoding((string)$cellValue, 'UTF-8', true) && preg_match('/[^\x00-\x7F]/', (string)$cellValue)) {
+                if (function_exists('iconv') && mb_detect_encoding((string)$cellValue, 'UTF-8', true) && preg_match('/[^\x00-\x7F]/', (string)$cellValue)) {
                     $convertedValue = @iconv('UTF-8', 'cp1252//IGNORE', (string)$cellValue);
                     if ($convertedValue !== false) { $cellValue = $convertedValue; }
                 }
@@ -75,20 +89,39 @@ class PDF extends FPDF {
 }
 // --- END FPDF Class ---
 
+// --- NEW: Function to redirect with error and form data ---
+function redirectWithError($message, $modal_id = null) {
+    $_SESSION['error_message'] = $message;
+    // Save POST data to session to repopulate form
+    $_SESSION['form_data'] = $_POST;
+    if ($modal_id) {
+        // Tell the page to reopen this specific modal
+        $_SESSION['open_modal'] = $modal_id;
+    }
+    header("Location: collections.php");
+    exit();
+}
 
 // --- Handle POST actions ---
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = $_POST['action'] ?? '';
-     function required($key) { return isset($_POST[$key]) && trim((string)$_POST[$key]) !== ''; } // Helper
+    function required($key) { return isset($_POST[$key]) && trim((string)$_POST[$key]) !== ''; } // Helper
 
     // --- PDF Generation Action ---
     if ($action === 'generate_current_view_pdf') {
-        if (defined('FPDF_MISSING') || !file_exists($fpdf_path)) { die("FPDF library not found."); }
+        if (defined('FPDF_MISSING') || !file_exists($fpdf_path)) {
+            // This is a fallback. JS check will catch it first.
+            echo "Error: The PDF generation library (FPDF) is missing. Please contact an administrator.";
+            exit();
+        }
 
         $jsonData = $_POST['pdf_data'] ?? '[]';
         $data = json_decode($jsonData, true);
         $filters = json_decode($_POST['pdf_filters'] ?? '{}', true);
-        if (json_last_error() !== JSON_ERROR_NONE) { die("Error decoding PDF data: " . json_last_error_msg()); }
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            echo "Error: Could not read the data to generate the PDF. The data from the page was corrupted.";
+            exit();
+        }
 
         $pdf = new PDF('L', 'mm', 'A4'); $pdf->AliasNbPages();
 
@@ -100,124 +133,303 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $sortKeyLabel = str_replace(['_','only'], [' ',''], $filters['sortKey'] ?? 'Default');
         $periodLabel .= " | Sorted By: " . ucwords($sortKeyLabel) . " " . ($filters['sortAsc'] ? '(Asc)' : '(Desc)');
 
+        // $current_display_name is already uppercase from the top of the script
         $pdf->setReportHeader($reportTitle, $periodLabel, $current_display_name);
         $pdf->AddPage(); $pdf->SetFont('Arial', '', 8);
 
         if (!empty($data)) {
             $header = ['Date', 'Client', 'Affiliation', 'Ref #', 'Amount', 'Received', 'Unpaid', 'Mode', 'In-Charge'];
             $table_data = [];
-            // Only calculate needed totals
             $total_amount = 0; $total_received = 0;
-            // $total_unpaid = 0; // Removed
 
             foreach ($data as $row) {
+                // Data from JS textContent is already uppercase
                 $rowData = [ $row['date'] ?? '', $row['client'] ?? '', $row['affiliation'] ?? '', $row['ref'] ?? '', $row['amount_display'] ?? '₱ 0.00', $row['received_display'] ?? '₱ 0.00', $row['unpaid_display'] ?? '₱ 0.00', $row['mode'] ?? '', $row['incharge'] ?? '' ];
                 $table_data[] = $rowData;
                 $total_amount += $row['amount'] ?? 0;
                 $total_received += $row['received'] ?? 0;
-                // $total_unpaid += $row['unpaid'] ?? 0; // Removed
             }
 
             $pdf->BasicTable($header, $table_data); $pdf->Ln(5); $pdf->SetFont('Arial', 'B', 10);
 
-            // --- MODIFIED SUMMARY SECTION ---
             $totalAmountStr = 'Total Amount: ₱ ' . number_format($total_amount, 2);
             $totalReceivedStr = 'Total Cash Received: ₱ ' . number_format($total_received, 2);
-            // $totalUnpaidStr = 'Total Unpaid: ₱ ' . number_format($total_unpaid, 2); // Removed calculation
 
             if (function_exists('iconv')) {
                 $totalAmountStr = @iconv('UTF-8', 'cp1252//IGNORE', $totalAmountStr) ?: $totalAmountStr;
                 $totalReceivedStr = @iconv('UTF-8', 'cp1252//IGNORE', $totalReceivedStr) ?: $totalReceivedStr;
-                // $totalUnpaidStr = @iconv('UTF-8', 'cp1252//IGNORE', $totalUnpaidStr) ?: $totalUnpaidStr; // Removed iconv call
             }
             $pdf->Cell(0, 6, $totalAmountStr, 0, 1, 'R');
             $pdf->Cell(0, 6, $totalReceivedStr, 0, 1, 'R');
-            // $pdf->Cell(0, 6, $totalUnpaidStr, 0, 1, 'R'); // Removed display line
-            // --- END MODIFIED SUMMARY ---
 
         } else { $pdf->SetFont('Arial', '', 10); $pdf->Cell(0, 10, 'No data matching the current view found.', 0, 1, 'C'); }
         $filename = "Collections_CurrentView_" . date('Ymd_His') . ".pdf";
         if (ob_get_level()) { ob_end_clean(); } $pdf->Output('D', $filename); exit();
     }
-    // (Add, Edit, Delete logic remains the same as previous correct version)
+
     elseif ($action === 'add') {
+        // Affiliation is NOT required
         if (!required('client_name') || !isset($_POST['amount']) || !isset($_POST['cash_received']) || !required('mode_of_payment')) {
-             $_SESSION['error_message'] = "Client Name, Amount, Cash Received, and Mode of Payment are required."; header("Location: collections.php"); exit();
+            redirectWithError("Please fill in all required fields: Client Name, Amount, Cash Received, and Mode of Payment.", '#modalAdd');
         }
-        $client_name = trim($_POST['client_name']); $affiliation = trim($_POST['affiliation'] ?? '');
-        $amount = (float)($_POST['amount'] ?? 0); $cash_received = (float)($_POST['cash_received'] ?? 0);
-        $mode_of_payment = trim($_POST['mode_of_payment']); $person_in_charge = $current_display_name;
+        
+        $client_name = strtoupper(trim($_POST['client_name']));
+        $affiliation = trim($_POST['affiliation'] ?? ''); // Optional
+        $amount = (float)($_POST['amount'] ?? 0); 
+        $cash_received = (float)($_POST['cash_received'] ?? 0);
+        $mode_of_payment = trim($_POST['mode_of_payment']);
+        $person_in_charge = $current_display_name; // Already uppercase
         $created_at_dt = date('Y-m-d H:i:s');
-        if ($amount <= 0 || $cash_received < 0 || $cash_received > $amount + 0.009) {
-            $_SESSION['error_message'] = "Invalid amount or cash received value."; header("Location: collections.php"); exit();
+
+        // User-friendly validation
+        if ($amount <= 0) {
+            redirectWithError("The 'Amount' must be a positive number (greater than 0).", '#modalAdd');
         }
-        $conn->begin_transaction(); $new_collection_id = null; $new_receivable_id = null;
+        if ($cash_received < 0) {
+            redirectWithError("The 'Cash Received' cannot be a negative number.", '#modalAdd');
+        }
+        if ($cash_received > $amount + 0.009) { // Use 0.009 for float precision
+            redirectWithError("The 'Cash Received' (₱" . number_format($cash_received, 2) . ") cannot be more than the total 'Amount' (₱" . number_format($amount, 2) . ").", '#modalAdd');
+        }
+
+        $conn->begin_transaction(); 
+        $new_collection_id = null; 
+        $new_receivable_id = null;
+        
         try {
             $collection_ref = "COLL-" . date("YmdHis") . "-" . rand(1000, 9999);
             $stmt_coll = $conn->prepare("INSERT INTO collections (client_name, affiliation, reference_number, amount, cash_received, mode_of_payment, person_in_charge, created_at, transaction_datetime) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
-            if (!$stmt_coll) throw new Exception("Prepare failed (collections): " . $conn->error);
+            // User-friendly error
+            if (!$stmt_coll) throw new Exception("Could not prepare the collection for saving. Please try again.");
+            
             $stmt_coll->bind_param("sssddssss", $client_name, $affiliation, $collection_ref, $amount, $cash_received, $mode_of_payment, $person_in_charge, $created_at_dt, $created_at_dt);
-            if (!$stmt_coll->execute()) throw new Exception("Execute failed (collections): " . $stmt_coll->error);
-            $new_collection_id = $conn->insert_id; $stmt_coll->close();
+            // User-friendly error
+            if (!$stmt_coll->execute()) throw new Exception("Could not save the collection. Please check for duplicates or invalid data.");
+            
+            $new_collection_id = $conn->insert_id; 
+            $stmt_coll->close();
+            
             $unpaid_amount = $amount - $cash_received;
+            
             if ($unpaid_amount > 0.009) {
                 $receivable_ref = "RCV-" . date("YmdHis") . "-" . rand(1000, 9999);
-                $stmt_recv = $conn->prepare("INSERT INTO receivables (client_name, affiliation, amount, amount_paid, mode_of_payment, is_paid, created_at, reference_number) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
-                if (!$stmt_recv) throw new Exception("Prepare failed (receivables): " . $conn->error);
+                // Note: mode_of_payment is no longer in receivables table
+                $stmt_recv = $conn->prepare("INSERT INTO receivables (client_name, affiliation, amount, amount_paid, person_in_charge, is_paid, created_at, reference_number, transaction_datetime) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
+                // User-friendly error
+                if (!$stmt_recv) throw new Exception("Could not prepare the linked receivable record.");
+                
                 $initial_paid_recv = 0.0; $is_paid_recv = 0;
-                $stmt_recv->bind_param("ssddisss", $client_name, $affiliation, $unpaid_amount, $initial_paid_recv, $mode_of_payment, $is_paid_recv, $created_at_dt, $receivable_ref);
-                if (!$stmt_recv->execute()) throw new Exception("Execute failed (receivables): " . $stmt_recv->error);
-                $new_receivable_id = $conn->insert_id; $stmt_recv->close();
+                $stmt_recv->bind_param("ssddsisss", $client_name, $affiliation, $unpaid_amount, $initial_paid_recv, $person_in_charge, $is_paid_recv, $created_at_dt, $receivable_ref, $created_at_dt);
+                
+                // User-friendly error
+                if (!$stmt_recv->execute()) throw new Exception("Collection was saved, but could not create the linked receivable for the unpaid amount.");
+                
+                $new_receivable_id = $conn->insert_id; 
+                $stmt_recv->close();
+                
                 $stmt_link = $conn->prepare("INSERT INTO coll_rec_link (coll_id, rec_id) VALUES (?, ?)");
-                 if (!$stmt_link) throw new Exception("Prepare failed (link): " . $conn->error);
+                // User-friendly error
+                if (!$stmt_link) throw new Exception("Could not prepare to link the records.");
+                
                 $stmt_link->bind_param("ii", $new_collection_id, $new_receivable_id);
-                if (!$stmt_link->execute()) throw new Exception("Execute failed (link): " . $stmt_link->error);
+                // User-friendly error
+                if (!$stmt_link->execute()) throw new Exception("Records were saved, but could not be linked. Please contact support.");
+                
                 $stmt_link->close();
-                $_SESSION['success_message'] = "Collection added and linked receivable created.";
+                $_SESSION['success_message'] = "Collection added and a new receivable was created for the unpaid amount.";
+
             } else { $_SESSION['success_message'] = "Collection added successfully (fully paid)."; }
+            
             $conn->commit();
-        } catch (Exception $e) { $conn->rollback(); $_SESSION['error_message'] = "Transaction failed: " . $e->getMessage(); }
+
+            // --- ADD LOGGING ---
+            try {
+                $log_user_id = $_SESSION['user_id'] ?? 0;
+                $log_username = $person_in_charge; // Already uppercase
+                $log_details = "User '{$log_username}' created Collection {$collection_ref} for '{$client_name}'. Amount: ₱" . number_format($amount, 2) . ($unpaid_amount > 0.009 ? " (Unpaid: ₱".number_format($unpaid_amount, 2).")" : " (Fully Paid)");
+                $log_stmt = $conn->prepare("INSERT INTO transaction_logs (user_id, username, action_type, entity_type, entity_id, details, log_timestamp) VALUES (?, ?, 'CREATE', 'Collection', ?, ?, ?)");
+                if ($log_stmt) {
+                    $log_stmt->bind_param("isiss", $log_user_id, $log_username, $new_collection_id, $log_details, $created_at_dt);
+                    $log_stmt->execute();
+                    $log_stmt->close();
+                }
+            } catch (Exception $log_e) { /* Optional: Log error to file */ }
+            // --- END LOGGING ---
+
+        } catch (Exception $e) {
+            $conn->rollback();
+            // MODIFIED: Pass user-friendly message from throw, and save form data
+            redirectWithError($e->getMessage(), '#modalAdd');
+        }
     }
     elseif ($action === 'edit') {
         $coll_id = intval($_POST['coll_id'] ?? 0);
+        // Affiliation is NOT required
         if ($coll_id <= 0 || !required('client_name') || !isset($_POST['amount']) || !isset($_POST['cash_received']) || !required('mode_of_payment')) {
-             $_SESSION['error_message'] = "Missing fields for editing."; header("Location: collections.php"); exit();
+            redirectWithError("Missing required fields. Please fill all fields to edit.", '#modalAdd');
         }
-        $client_name = trim($_POST['client_name']); $affiliation = trim($_POST['affiliation'] ?? '');
-        $amount = (float)($_POST['amount'] ?? 0); $cash_received = (float)($_POST['cash_received'] ?? 0);
+        
+        $client_name = strtoupper(trim($_POST['client_name']));
+        $affiliation = trim($_POST['affiliation'] ?? ''); // Optional
+        $amount = (float)($_POST['amount'] ?? 0); 
+        $cash_received = (float)($_POST['cash_received'] ?? 0);
         $mode_of_payment = trim($_POST['mode_of_payment']);
-         if ($amount <= 0 || $cash_received < 0 || $cash_received > $amount + 0.009) {
-            $_SESSION['error_message'] = "Invalid amount or cash received."; header("Location: collections.php"); exit();
+        
+        // User-friendly validation
+        if ($amount <= 0) {
+            redirectWithError("The 'Amount' must be a positive number (greater than 0).", '#modalAdd');
         }
+        if ($cash_received < 0) {
+            redirectWithError("The 'Cash Received' cannot be a negative number.", '#modalAdd');
+        }
+        if ($cash_received > $amount + 0.009) {
+            redirectWithError("The 'Cash Received' (₱" . number_format($cash_received, 2) . ") cannot be more than the total 'Amount' (₱" . number_format($amount, 2) . ").", '#modalAdd');
+        }
+
+        // --- SERVER-SIDE "NO CHANGES" CHECK (as a fallback) ---
+        $stmt_check_changes = $conn->prepare("SELECT client_name, affiliation, amount, cash_received, mode_of_payment FROM collections WHERE coll_id = ?");
+        $no_changes_found = false;
+        if ($stmt_check_changes) {
+            $stmt_check_changes->bind_param("i", $coll_id);
+            if ($stmt_check_changes->execute()) {
+                $stmt_check_changes->bind_result($old_client, $old_aff, $old_amount, $old_cash, $old_mode);
+                if ($stmt_check_changes->fetch()) {
+                    // Compare fetched data with POST data
+                    if (
+                        $old_client === $client_name &&
+                        $old_aff === $affiliation &&
+                        abs($old_amount - $amount) < 0.009 &&
+                        abs($old_cash - $cash_received) < 0.009 &&
+                        $old_mode === $mode_of_payment
+                    ) {
+                        $no_changes_found = true;
+                    }
+                }
+            }
+            $stmt_check_changes->close();
+        }
+        
+        if ($no_changes_found) {
+            // Use redirectWithError to show an info message (which JS will treat as an error)
+            redirectWithError("No changes were detected. The record was not updated.", '#modalAdd');
+        }
+        // --- END "NO CHANGES" CHECK ---
+
         $linked_rec_id = null;
         $stmt_check = $conn->prepare("SELECT rec_id FROM coll_rec_link WHERE coll_id = ?");
-        if($stmt_check){ $stmt_check->bind_param("i", $coll_id); $stmt_check->execute(); $stmt_check->bind_result($linked_rec_id); $stmt_check->fetch(); $stmt_check->close();
-            if($linked_rec_id !== null){ $_SESSION['warning_message'] = "Warning: Editing linked collection (Rec ID: $linked_rec_id). Verify receivable."; }
+        // This check is non-fatal. If it fails, we just don't show the warning.
+        if($stmt_check){ 
+            $stmt_check->bind_param("i", $coll_id); 
+            $stmt_check->execute(); 
+            $stmt_check->bind_result($linked_rec_id); 
+            $stmt_check->fetch(); 
+            $stmt_check->close();
+            if($linked_rec_id !== null){
+                // User-friendly warning
+                $_SESSION['warning_message'] = "This collection is linked to a receivable (ID: $linked_rec_id). Please check the receivable record to ensure its amount is also correct.";
+            }
         }
-        $stmt = $conn->prepare("UPDATE collections SET client_name=?, affiliation=?, amount=?, cash_received=?, mode_of_payment=? WHERE coll_id=?");
+        
+        $stmt = $conn->prepare("UPDATE collections SET client_name=?, affiliation=?, amount=?, cash_received=?, mode_of_payment=?, person_in_charge=?, transaction_datetime=NOW() WHERE coll_id=?");
         if ($stmt) {
-             $stmt->bind_param("ssddsi", $client_name, $affiliation, $amount, $cash_received, $mode_of_payment, $coll_id);
-             if ($stmt->execute()) { $_SESSION['success_message'] = "Collection updated."; } else { $_SESSION['error_message'] = "Error updating: " . $stmt->error; }
-             $stmt->close();
-        } else { $_SESSION['error_message'] = "DB error: " . $conn->error; }
+            $stmt->bind_param("ssddssi", $client_name, $affiliation, $amount, $cash_received, $mode_of_payment, $current_display_name, $coll_id);
+            if ($stmt->execute()) {
+                $_SESSION['success_message'] = "Collection updated successfully.";
+                // --- ADD LOGGING ---
+                try {
+                    $log_user_id = $_SESSION['user_id'] ?? 0;
+                    $log_username = $current_display_name; // Already uppercase
+                    $log_details = "User '{$log_username}' edited Collection ID {$coll_id} ('{$client_name}'). New Amount: ₱" . number_format($amount, 2);
+                    $log_stmt = $conn->prepare("INSERT INTO transaction_logs (user_id, username, action_type, entity_type, entity_id, details) VALUES (?, ?, 'UPDATE', 'Collection', ?, ?)");
+                    if ($log_stmt) {
+                        $log_stmt->bind_param("isis", $log_user_id, $log_username, $coll_id, $log_details);
+                        $log_stmt->execute();
+                        $log_stmt->close();
+                    }
+                } catch (Exception $log_e) { /* Optional: Log error to file */ }
+                // --- END LOGGING ---
+            } else {
+                // User-friendly error + data retention
+                redirectWithError("A database error occurred while updating. The changes were not saved.", '#modalAdd');
+            }
+            $stmt->close();
+        } else {
+            // User-friendly error + data retention
+            redirectWithError("A database error occurred. Could not prepare the update.", '#modalAdd');
+        }
     }
     elseif ($action === 'delete') {
         $coll_id = intval($_POST['coll_id'] ?? 0);
         if ($coll_id > 0) {
+
+            // --- ADD LOGGING (Must happen before delete) ---
+            try {
+                $ref_num_log = 'ID ' . $coll_id;
+                $client_name_log = 'Unknown Client';
+                $stmt_get = $conn->prepare("SELECT reference_number, client_name FROM collections WHERE coll_id = ?");
+                if($stmt_get){
+                    $stmt_get->bind_param("i", $coll_id);
+                    if($stmt_get->execute()) {
+                        $stmt_get->bind_result($ref_num_log, $client_name_log);
+                        $stmt_get->fetch();
+                    }
+                    $stmt_get->close();
+                }
+
+                $log_user_id = $_SESSION['user_id'] ?? 0;
+                $log_username = $current_display_name; // Already uppercase
+                $log_details = "User '{$log_username}' DELETED Collection '{$ref_num_log}' for client '" . strtoupper($client_name_log) . "'.";
+                $log_stmt = $conn->prepare("INSERT INTO transaction_logs (user_id, username, action_type, entity_type, entity_id, details) VALUES (?, ?, 'DELETE', 'Collection', ?, ?)");
+                if ($log_stmt) {
+                    $log_stmt->bind_param("isis", $log_user_id, $log_username, $coll_id, $log_details);
+                    $log_stmt->execute();
+                    $log_stmt->close();
+                }
+            } catch (Exception $log_e) { /* Optional: Log error to file */ }
+            // --- END LOGGING ---
+
             $linked_rec_id = null;
             $stmt_check = $conn->prepare("SELECT rec_id FROM coll_rec_link WHERE coll_id = ?");
-             if($stmt_check){ $stmt_check->bind_param("i", $coll_id); $stmt_check->execute(); $stmt_check->bind_result($linked_rec_id); $stmt_check->fetch(); $stmt_check->close();
-                 if($linked_rec_id !== null){ $_SESSION['warning_message'] = "Warning: Deleting collection linked to Rec ID: $linked_rec_id. Receivable remains."; }
+            // This is non-fatal, just for the warning
+            if($stmt_check){ 
+                $stmt_check->bind_param("i", $coll_id); 
+                $stmt_check->execute(); 
+                $stmt_check->bind_result($linked_rec_id); 
+                $stmt_check->fetch(); 
+                $stmt_check->close();
+                if($linked_rec_id !== null){
+                    $_SESSION['warning_message'] = "This collection was linked to a receivable (ID: $linked_rec_id). The receivable record was NOT deleted.";
+                }
             }
+            
             $stmt = $conn->prepare("DELETE FROM collections WHERE coll_id=?");
-             if ($stmt) { $stmt->bind_param("i", $coll_id);
-                 if ($stmt->execute()) { $_SESSION['success_message'] = "Collection deleted."; } else { $_SESSION['error_message'] = "Error deleting: " . $stmt->error; }
+            if ($stmt) { 
+                $stmt->bind_param("i", $coll_id);
+                if ($stmt->execute()) { 
+                    $_SESSION['success_message'] = "Collection deleted successfully."; 
+                } else {
+                    // User-friendly error
+                    $_SESSION['error_message'] = "Could not delete the item. It might be in use or protected by the database.";
+                }
                 $stmt->close();
-             } else { $_SESSION['error_message'] = "DB error: " . $conn->error; }
-        } else { $_SESSION['error_message'] = "Invalid ID."; }
+            } else {
+                // User-friendly error
+                $_SESSION['error_message'] = "A database error occurred. Could not prepare the delete operation.";
+            }
+        } else {
+            // User-friendly error
+            $_SESSION['error_message'] = "Invalid ID provided. No item was deleted.";
+        }
     }
-    header("Location: collections.php"); exit();
+    header("Location: collections.php"); 
+    exit();
 }
+
+// --- NEW: Check for saved form data from a previous error ---
+$form_data = $_SESSION['form_data'] ?? [];
+$open_modal = $_SESSION['open_modal'] ?? null;
+unset($_SESSION['form_data'], $_SESSION['open_modal']);
+
 
 // Fetch initial data - Ensure coll_id is selected
 $collections_q = mysqli_query($conn, "SELECT coll_id, client_name, affiliation, reference_number, amount, cash_received, (amount - IFNULL(cash_received,0)) AS unpaid_payment, mode_of_payment, person_in_charge, created_at, DATE(created_at) as date_created_only FROM collections ORDER BY created_at DESC");
@@ -226,6 +438,12 @@ $error_message = $_SESSION['error_message'] ?? null;
 $success_message = $_SESSION['success_message'] ?? null;
 $warning_message = $_SESSION['warning_message'] ?? null;
 unset($_SESSION['error_message'], $_SESSION['success_message'], $_SESSION['warning_message']);
+
+// --- NEW: Check for main query failure ---
+if ($collections_q === false && !$error_message) {
+    // Only set this if no other error is pending
+    $error_message = "A fatal error occurred. Could not load collections data from the database. Please refresh the page.";
+}
 
 ?>
 <!doctype html>
@@ -271,7 +489,6 @@ unset($_SESSION['error_message'], $_SESSION['success_message'], $_SESSION['warni
     th{background:#ffd6e5;color:#6b4a57;cursor:pointer;user-select:none;position:relative; font-weight: 600;}
     th .sort-icon{margin-left:6px;font-size:11px;color:#888}
     tr:hover{background:#fff6f9}
-    /* .unpaid-row removed */
     .icon-btn{background:none;border:none;color:var(--accent);cursor:pointer;font-size:15px;margin:0 4px;transition:.2s}
     .icon-btn:hover{transform:scale(1.15); color: var(--accent-dark);}
     .pagination{text-align:center;margin-top:18px;display:flex;justify-content:center;gap:6px;flex-wrap:wrap}
@@ -284,6 +501,8 @@ unset($_SESSION['error_message'], $_SESSION['success_message'], $_SESSION['warni
     .modal form label { font-size: 14px; font-weight: 600; color: var(--muted); display: block; margin-top: 15px; margin-bottom: 5px; }
     .modal form input, .modal form select { width: 100%; padding: 12px 15px; margin-bottom: 12px; border: 1px solid #ddd; border-radius: 8px; background: #f9f9f9; font-size: 14px; transition: all 0.2s ease; font-family:"Poppins",sans-serif; }
     .modal form input:focus, .modal form select:focus { outline: none; border-color: var(--accent); background: #fff; box-shadow: 0 0 0 3px rgba(216, 76, 115, 0.15); }
+    /* MODIFIED: Add style for uppercase input */
+    .modal form input[name="client_name"] { text-transform: uppercase; }
     .modal .actions { display: flex; justify-content: flex-end; margin-top: 25px; gap: 10px; }
     @keyframes fadeIn { from { opacity: 0; transform: scale(0.95); } to { opacity: 1; transform: scale(1); } }
     @keyframes slideUp { from { transform: translateY(15px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
@@ -313,6 +532,9 @@ unset($_SESSION['error_message'], $_SESSION['success_message'], $_SESSION['warni
     <div class="tab active">Collections</div>
     <div class="tab" onclick="location.href='receivables.php'">Receivables</div>
     <div class="tab" onclick="location.href='expenses.php'">Expenses</div>
+    <?php if ($is_admin): ?>
+        <div class="tab" onclick="location.href='transaction_logs.php'">Logs</div>
+    <?php endif; ?>
   </div>
 
   <div class="toolbar">
@@ -342,6 +564,7 @@ unset($_SESSION['error_message'], $_SESSION['success_message'], $_SESSION['warni
         </thead>
         <tbody>
             <?php
+            // Use the check for $collections_q from before the <html> tag
             if ($collections_q) {
                 while ($r = mysqli_fetch_assoc($collections_q)):
                     $unpaid = floatval($r['unpaid_payment']);
@@ -352,53 +575,65 @@ unset($_SESSION['error_message'], $_SESSION['success_message'], $_SESSION['warni
                     $date_formatted = !empty($r['date_created_only']) ? date('M d, Y', strtotime($r['date_created_only'])) : '';
             ?>
             <tr data-row="<?= $data ?>">
-            <td><?= $date_formatted ?></td>
-              <td><?= htmlspecialchars($r['client_name']) ?></td>
+              <td><?= $date_formatted ?></td>
+              <td><?= htmlspecialchars(strtoupper($r['client_name'])) ?></td>
               <td><?= htmlspecialchars($r['affiliation']) ?></td>
               <td><?= htmlspecialchars($r['reference_number']) ?></td>
               <td>₱<?= number_format($r['amount'], 2) ?></td>
               <td>₱<?= number_format($r['cash_received'], 2) ?></td>
               <td>₱<?= number_format($unpaid, 2) ?></td>
               <td><?= htmlspecialchars($r['mode_of_payment']) ?></td>
-              <td><?= htmlspecialchars($r['person_in_charge']) ?></td>
+              <td><?= htmlspecialchars(strtoupper($r['person_in_charge'])) ?></td>
               <td>
                 <button class="icon-btn editBtn" title="Edit"><i class="fa fa-pen"></i></button>
-                <button class="icon-btn deleteBtn" title="Delete"><i class="fa fa-trash"></i></button>
+                <?php if ($is_admin): ?>
+                  <button class="icon-btn deleteBtn" title="Delete"><i class="fa fa-trash"></i></button>
+                <?php endif; ?>
               </td>
             </tr>
             <?php
                 endwhile;
-                 mysqli_free_result($collections_q);
-             } else {
-                 echo "<tr><td colspan='10'>Error fetching data: " . mysqli_error($conn) . "</td></tr>";
-             }
-             ?>
+                mysqli_free_result($collections_q);
+            } else {
+                // The main error is now shown in a SweetAlert
+                echo "<tr><td colspan='10' style='text-align:center;color:var(--danger);'>Could not load data. An error was reported.</td></tr>";
+            }
+            ?>
         </tbody>
     </table>
     <div class="pagination" id="pagination"></div>
   </div>
 </main>
 
-<div class="modal" id="modalAdd">
+<div class="modal <?= $open_modal === '#modalAdd' ? 'active' : '' ?>" id="modalAdd">
   <div class="modal-content">
     <h2 id="addTitle">Add Collection</h2>
     <form method="post" id="formAdd" action="collections.php">
-      <input type="hidden" name="action" id="formAddAction" value="add">
-      <input type="hidden" name="coll_id" id="formAddId">
+      <input type="hidden" name="action" id="formAddAction" value="<?= htmlspecialchars($form_data['action'] ?? 'add') ?>">
+      <input type="hidden" name="coll_id" id="formAddId" value="<?= htmlspecialchars($form_data['coll_id'] ?? '') ?>">
+      
       <label>Client Name</label>
-      <input type="text" name="client_name" id="client_name" required>
-      <label>Affiliation</label>
-      <input type="text" name="affiliation" id="affiliation">
+      <input type="text" name="client_name" id="client_name" required value="<?= htmlspecialchars($form_data['client_name'] ?? '') ?>">
+      
+      <label>Affiliation (Optional)</label>
+      <input type="text" name="affiliation" id="affiliation" value="<?= htmlspecialchars($form_data['affiliation'] ?? '') ?>">
+      
       <label>Amount</label>
-      <input type="number" step="0.01" name="amount" id="amount" required min="0.01">
+      <input type="number" step="0.01" name="amount" id="amount" required min="0.01" value="<?= htmlspecialchars($form_data['amount'] ?? '') ?>">
+      
       <label>Cash Received</label>
-      <input type="number" step="0.01" name="cash_received" id="cash_received" required min="0">
+      <input type="number" step="0.01" name="cash_received" id="cash_received" required min="0" value="<?= htmlspecialchars($form_data['cash_received'] ?? '') ?>">
+      
       <label>Mode of Payment</label>
       <select name="mode_of_payment" id="mode_of_payment" required>
         <option value="">-- Select --</option>
-        <option value="Cash">Cash</option> <option value="Gcash">Gcash</option>
-        <option value="Bank">Bank</option> <option value="Other">Other</option>
+        <?php $selected_mode = $form_data['mode_of_payment'] ?? ''; ?>
+        <option value="Cash" <?= $selected_mode === 'Cash' ? 'selected' : '' ?>>Cash</option>
+        <option value="Gcash" <?= $selected_mode === 'Gcash' ? 'selected' : '' ?>>Gcash</option>
+        <option value="Bank" <?= $selected_mode === 'Bank' ? 'selected' : '' ?>>Bank</option>
+        <option value="Other" <?= $selected_mode === 'Other' ? 'selected' : '' ?>>Other</option>
       </select>
+      
       <div class="actions">
         <button type="button" class="btn" id="closeAdd">Cancel</button>
         <button type="submit" class="btn primary">Save</button>
@@ -414,10 +649,15 @@ unset($_SESSION['error_message'], $_SESSION['success_message'], $_SESSION['warni
 </form>
 
 <script>
+  const FPDF_MISSING = <?= defined('FPDF_MISSING') ? 'true' : 'false' ?>;
+  const MODAL_TO_OPEN = '<?= $open_modal ?? '' ?>';
+</script>
+
+<script>
 /* DOM helpers & initial state - Same */
 const searchInput = document.getElementById('searchInput');
 const rowsPerPageInput = document.getElementById('rowsPerPageInput');
-const allRows = Array.from(document.querySelectorAll('#collectionsTable tbody tr'));
+const allRows = Array.from(document.querySelectorAll('#collectionsTable tbody tr[data-row]')); // Only select data rows
 const generatePdfBtn = document.getElementById('generatePdfBtn');
 const pdfForm = document.getElementById('pdfForm');
 const pdfDataInput = document.getElementById('pdfDataInput');
@@ -428,22 +668,56 @@ let currentPage = 1;
 let currentSortKey = 'created_at';
 let currentSortAsc = false;
 
+// --- MODIFIED: Store original data for "no changes" check ---
+let originalEditData = {};
+
 /* Add / Edit modal wiring - Use coll_id */
 const modalAdd = document.getElementById('modalAdd'); const formAdd = document.getElementById('formAdd');
 const openAddBtn = document.getElementById('openAddBtn'); const closeAdd = document.getElementById('closeAdd');
 const addTitle = document.getElementById('addTitle');
 
-openAddBtn.onclick = () => { formAdd.reset(); document.getElementById('formAddAction').value = 'add'; document.getElementById('formAddId').value = ''; addTitle.textContent = 'New Collection'; modalAdd.classList.add('active'); };
+openAddBtn.onclick = () => { 
+    formAdd.reset(); 
+    document.getElementById('formAddAction').value = 'add'; 
+    document.getElementById('formAddId').value = ''; 
+    addTitle.textContent = 'New Collection'; 
+    originalEditData = {}; // Clear original data
+    modalAdd.classList.add('active'); 
+};
 closeAdd.onclick = () => modalAdd.classList.remove('active');
 
 document.querySelectorAll('.editBtn').forEach(btn=>{
   btn.onclick = (e)=>{
+    // Clear form first in case it was repopulated from an error
+    formAdd.reset(); 
     const tr = btn.closest('tr'); const data = JSON.parse(tr.dataset.row);
+    
+    // Populate form
     document.getElementById('formAddAction').value = 'edit';
     document.getElementById('formAddId').value = data.coll_id; // Use coll_id
-    document.getElementById('client_name').value = data.client_name; document.getElementById('affiliation').value = data.affiliation || '';
-    document.getElementById('amount').value = parseFloat(data.amount || 0).toFixed(2); document.getElementById('cash_received').value = parseFloat(data.cash_received || 0).toFixed(2);
-    document.getElementById('mode_of_payment').value = data.mode_of_payment || ''; addTitle.textContent = 'Edit Collection'; modalAdd.classList.add('active');
+    const clientName = data.client_name ? data.client_name.toUpperCase() : '';
+    const affiliation = data.affiliation || '';
+    const amount = parseFloat(data.amount || 0).toFixed(2);
+    const cashReceived = parseFloat(data.cash_received || 0).toFixed(2);
+    const mode = data.mode_of_payment || '';
+    
+    document.getElementById('client_name').value = clientName;
+    document.getElementById('affiliation').value = affiliation;
+    document.getElementById('amount').value = amount;
+    document.getElementById('cash_received').value = cashReceived;
+    document.getElementById('mode_of_payment').value = mode;
+    addTitle.textContent = 'Edit Collection'; 
+    
+    // --- MODIFIED: Store original data for comparison ---
+    originalEditData = {
+        client_name: clientName,
+        affiliation: affiliation,
+        amount: amount,
+        cash_received: cashReceived,
+        mode_of_payment: mode
+    };
+    
+    modalAdd.classList.add('active');
   }
 });
 
@@ -451,8 +725,10 @@ document.querySelectorAll('.editBtn').forEach(btn=>{
 document.querySelectorAll('.deleteBtn').forEach(btn=>{
   btn.onclick = ()=>{
     const data = JSON.parse(btn.closest('tr').dataset.row); const coll_id = data.coll_id; // Use coll_id
+    const clientNameFromCell = btn.closest('tr').cells[1].textContent;
     Swal.fire({
-        title: 'Are you sure?', text: `Delete collection Ref# ${data.reference_number}?`,
+        title: 'Are you sure?',
+        text: `This will permanently delete the collection for '${clientNameFromCell}' (Ref# ${data.reference_number}). You cannot undo this.`,
         icon: 'warning', showCancelButton: true, confirmButtonText: 'Yes, delete it!',
         buttonsStyling: false, customClass: { confirmButton: 'btn primary', cancelButton: 'btn' }
     }).then((result) => {
@@ -468,7 +744,25 @@ document.querySelectorAll('.deleteBtn').forEach(btn=>{
 /* --- Filter, Sort, Pagination --- Same as before */
 function getFilteredRows() { const q = searchInput.value.toLowerCase().trim(); return allRows.filter(r => { const tc = r.textContent.toLowerCase(); return !q || tc.includes(q); }); }
 function sortRows(rowsToSort, key, asc) { rowsToSort.sort((a, b) => { const A_data = JSON.parse(a.dataset.row); const B_data = JSON.parse(b.dataset.row); let A = A_data[key]; let B = B_data[key]; if (['amount', 'cash_received', 'unpaid_payment'].includes(key)) { const numA = parseFloat(A) || 0; const numB = parseFloat(B) || 0; return asc ? (numA - numB) : (numB - numA); } if (key === 'date_created_only') { A = A_data['created_at'] || 0; B = B_data['created_at'] || 0; const dateA = new Date(A); const dateB = new Date(B); return asc ? dateA - dateB : dateB - dateA; } const sa = (A || '').toString().toLowerCase(); const sb = (B || '').toString().toLowerCase(); return asc ? sa.localeCompare(sb) : sb.localeCompare(sa); }); }
-function renderTable() { const fr = getFilteredRows(); sortRows(fr, currentSortKey, currentSortAsc); const tb = document.querySelector('#collectionsTable tbody'); tb.innerHTML = ''; const st = (currentPage - 1) * rowsPerPage; const en = st + rowsPerPage; const pr = fr.slice(st, en); pr.forEach(r => tb.appendChild(r)); renderPagination(fr.length); }
+function renderTable() { 
+    const fr = getFilteredRows(); 
+    sortRows(fr, currentSortKey, currentSortAsc); 
+    const tb = document.querySelector('#collectionsTable tbody'); 
+    tb.innerHTML = ''; 
+    const st = (currentPage - 1) * rowsPerPage; 
+    const en = st + rowsPerPage; 
+    const pr = fr.slice(st, en); 
+    
+    if (pr.length === 0 && allRows.length > 0) {
+        tb.innerHTML = '<tr><td colspan="10" style="text-align:center;">No collections found matching your search.</td></tr>';
+    } else if (allRows.length === 0 && <?= $collections_q ? 'true' : 'false' ?>) {
+        tb.innerHTML = '<tr><td colspan="10" style="text-align:center;">No collections have been recorded yet.</td></tr>';
+    } else {
+        pr.forEach(r => tb.appendChild(r)); 
+    }
+    
+    renderPagination(fr.length); 
+}
 function renderPagination(total) { const c = document.getElementById('pagination'); c.innerHTML = ''; const tp = Math.max(1, Math.ceil(total / rowsPerPage)); if (tp <= 1) return; for (let i = 1; i <= tp; i++) { const b = document.createElement('button'); b.textContent = i; if (i === currentPage) b.classList.add('active'); b.onclick = () => { currentPage = i; renderTable(); }; c.appendChild(b); } }
 
 /* --- Event Listeners --- Same as before */
@@ -476,19 +770,185 @@ searchInput.addEventListener('input', () => { currentPage = 1; renderTable(); })
 rowsPerPageInput.addEventListener('change', () => { let nr = parseInt(rowsPerPageInput.value); if (nr > 0) { rowsPerPage = nr; } else { rowsPerPageInput.value = rowsPerPage; } currentPage = 1; renderTable(); });
 document.querySelectorAll('th[data-key]').forEach(th => { th.addEventListener('click', () => { const k = th.dataset.key; if (currentSortKey === k) { currentSortAsc = !currentSortAsc; } else { currentSortKey = k; currentSortAsc = true; } document.querySelectorAll('.sort-icon').forEach(i => i.className = 'fa fa-sort sort-icon'); th.querySelector('.sort-icon').className = currentSortAsc ? 'fa fa-sort-up sort-icon' : 'fa fa-sort-down sort-icon'; currentPage = 1; renderTable(); }); });
 
-/* PDF Generation Button Listener - Same, removed related_ref */
+/* PDF Generation Button Listener - NEW FPDF Check */
 generatePdfBtn.addEventListener('click', () => {
+    // NEW: User-friendly SweetAlert check for missing library
+    if (typeof FPDF_MISSING !== 'undefined' && FPDF_MISSING) {
+        Swal.fire({
+            icon: 'error',
+            title: 'PDF Generation Error',
+            text: 'The PDF library (FPDF) is missing on the server. Please contact an administrator to fix the installation.',
+            buttonsStyling: false,
+            customClass: { confirmButton: 'btn primary' }
+        });
+        return; // Stop the PDF generation
+    }
+
     const filteredAndSortedRows = getFilteredRows(); sortRows(filteredAndSortedRows, currentSortKey, currentSortAsc);
-    const dataForPdf = filteredAndSortedRows.map(row => { const rowData = JSON.parse(row.dataset.row); const cells = row.getElementsByTagName('td'); return { date: cells[0]?.textContent||'', client: cells[1]?.textContent||'', affiliation: cells[2]?.textContent||'', ref: cells[3]?.textContent||'', amount_display: cells[4]?.textContent||'₱ 0.00', received_display: cells[5]?.textContent||'₱ 0.00', unpaid_display: cells[6]?.textContent||'₱ 0.00', mode: cells[7]?.textContent||'', incharge: cells[8]?.textContent||'', amount: parseFloat(rowData.amount||0), received: parseFloat(rowData.cash_received||0), unpaid: parseFloat(rowData.unpaid_payment||0) }; });
+    const dataForPdf = filteredAndSortedRows.map(row => { const rowData = JSON.parse(row.dataset.row); const cells = row.getElementsByTagName('td');
+        // textContent from cells is already uppercase due to PHP strtoupper()
+        return {
+            date: cells[0]?.textContent||'',
+            client: cells[1]?.textContent||'', // Already uppercase
+            affiliation: cells[2]?.textContent||'',
+            ref: cells[3]?.textContent||'',
+            amount_display: cells[4]?.textContent||'₱ 0.00',
+            received_display: cells[5]?.textContent||'₱ 0.00',
+            unpaid_display: cells[6]?.textContent||'₱ 0.00',
+            mode: cells[7]?.textContent||'',
+            incharge: cells[8]?.textContent||'', // Already uppercase
+            amount: parseFloat(rowData.amount||0),
+            received: parseFloat(rowData.cash_received||0),
+            unpaid: parseFloat(rowData.unpaid_payment||0)
+        };
+    });
     const filtersForPdf = { search: searchInput.value, sortKey: currentSortKey, sortAsc: currentSortAsc };
     pdfDataInput.value = JSON.stringify(dataForPdf); pdfFiltersInput.value = JSON.stringify(filtersForPdf); pdfForm.submit();
 });
 
-/* --- Form Validation & Modal Close --- Same as before */
-renderTable();
-formAdd.addEventListener('submit', function(e){ const c = document.getElementById('client_name').value.trim(); const a = parseFloat(document.getElementById('amount').value); const cr = parseFloat(document.getElementById('cash_received').value); const m = document.getElementById('mode_of_payment').value; let err = ''; if (!c) { err = 'Client name required.'; } else if (isNaN(a) || a <= 0) { err = 'Valid amount > 0 required.'; } else if (isNaN(cr) || cr < 0) { err = 'Valid cash received >= 0 required.'; } else if (cr > a + 0.009) { err = 'Cash received > amount.'; } else if (!m) { err = 'Select mode of payment.';} if (err) { e.preventDefault(); Swal.fire({ icon: 'error', title: 'Validation Error', text: err, buttonsStyling: false, customClass: { confirmButton: 'btn primary' } }); return false; } });
+/* --- Form Validation & Modal Close --- */
+renderTable(); // Initial Render
+
+// --- MODIFIED: Intercept submit for validation, "no changes" check, and confirmation ---
+formAdd.addEventListener('submit', async function(e){
+    // 1. PREVENT default submission
+    e.preventDefault(); 
+    
+    // 2. Run client-side validation
+    const c = document.getElementById('client_name').value.trim();
+    const a = parseFloat(document.getElementById('amount').value);
+    const cr = parseFloat(document.getElementById('cash_received').value);
+    const m = document.getElementById('mode_of_payment').value;
+    let err = '';
+    
+    if (!c) { err = 'Please enter a client name.'; }
+    else if (isNaN(a) || a <= 0) { err = "Please enter a valid amount that is greater than 0."; }
+    else if (isNaN(cr) || cr < 0) { err = "Please enter a valid cash amount (0 or more)."; }
+    else if (cr > a + 0.009) { err = 'Cash received cannot be more than the total amount.'; }
+    else if (!m) { err = 'Please select a mode of payment.';}
+    
+    if (err) {
+        Swal.fire({
+            icon: 'error', title: 'Oops... Please check the form', text: err,
+            buttonsStyling: false, customClass: { confirmButton: 'btn primary' }
+        });
+        return; // Stop
+    }
+
+    // 3. Get action type
+    const action = document.getElementById('formAddAction').value;
+
+    if (action === 'edit') {
+        // 4a. Check for "No Changes"
+        const currentData = {
+            client_name: document.getElementById('client_name').value.toUpperCase().trim(),
+            affiliation: document.getElementById('affiliation').value.trim(),
+            amount: parseFloat(document.getElementById('amount').value).toFixed(2),
+            cash_received: parseFloat(document.getElementById('cash_received').value).toFixed(2),
+            mode_of_payment: document.getElementById('mode_of_payment').value
+        };
+
+        if (
+            originalEditData.client_name === currentData.client_name &&
+            originalEditData.affiliation === currentData.affiliation &&
+            originalEditData.amount === currentData.amount &&
+            originalEditData.cash_received === currentData.cash_received &&
+            originalEditData.mode_of_payment === currentData.mode_of_payment
+        ) {
+            Swal.fire({
+                icon: 'info',
+                title: 'No Changes Detected',
+                text: 'You have not made any changes to save.',
+                buttonsStyling: false,
+                customClass: { confirmButton: 'btn primary' }
+            });
+            return; // Stop, keep modal open
+        }
+        
+        // 4b. Confirm Update
+        const result = await Swal.fire({
+            title: 'Confirm Update',
+            text: 'Are you sure you want to save these changes?',
+            icon: 'warning',
+            showCancelButton: true,
+            confirmButtonText: 'Yes, update it!',
+            buttonsStyling: false,
+            customClass: { confirmButton: 'btn primary', cancelButton: 'btn' }
+        });
+
+        if (result.isConfirmed) {
+            formAdd.submit(); // Proceed with submission
+        }
+        
+    } else if (action === 'add') {
+        // 5. Confirm Add
+        const result = await Swal.fire({
+            title: 'Confirm New Collection',
+            text: 'Are you sure you want to save this new collection?',
+            icon: 'question',
+            showCancelButton: true,
+            confirmButtonText: 'Yes, save it!',
+            buttonsStyling: false,
+            customClass: { confirmButton: 'btn primary', cancelButton: 'btn' }
+        });
+
+        if (result.isConfirmed) {
+            formAdd.submit(); // Proceed with submission
+        }
+    }
+});
+
 document.querySelectorAll('.modal').forEach(m=>{ m.addEventListener('click', (ev)=>{ if (ev.target === m) m.classList.remove('active'); }); });
-document.addEventListener('DOMContentLoaded', () => { <?php if ($success_message): ?> Swal.fire({ icon: 'success', title: 'Success', text: '<?= addslashes($success_message) ?>', timer: 2500, showConfirmButton: false }); <?php elseif ($error_message): ?> Swal.fire({ icon: 'error', title: 'Error', text: '<?= addslashes($error_message) ?>', confirmButtonText: 'OK', buttonsStyling: false, customClass: { confirmButton: 'btn primary' } }); <?php elseif ($warning_message): ?> Swal.fire({ icon: 'warning', title: 'Warning', text: '<?= addslashes($warning_message) ?>', confirmButtonText: 'OK', buttonsStyling: false, customClass: { confirmButton: 'btn primary' } }); <?php endif; ?> });
+
+// MODIFIED: This block now handles all session messages AND re-opens the modal
+document.addEventListener('DOMContentLoaded', () => {
+    <?php if ($success_message): ?>
+    Swal.fire({
+        icon: 'success', title: 'Success!',
+        text: '<?= addslashes($success_message) ?>',
+        timer: 2500, showConfirmButton: false
+    });
+    <?php elseif ($error_message): ?>
+    Swal.fire({
+        icon: 'error', title: 'An Error Occurred',
+        text: '<?= addslashes($error_message) ?>', // This now shows the user-friendly PHP message
+        confirmButtonText: 'OK', buttonsStyling: false,
+        customClass: { confirmButton: 'btn primary' }
+    });
+    <?php elseif ($warning_message): ?>
+    Swal.fire({
+        icon: 'warning', title: 'Please Note',
+        text: '<?= addslashes($warning_message) ?>', // This now shows the user-friendly PHP message
+        confirmButtonText: 'OK', buttonsStyling: false,
+        customClass: { confirmButton: 'btn primary' }
+    });
+    <?php endif; ?>
+
+    // --- NEW: Check if PHP told us to re-open a modal ---
+    if (MODAL_TO_OPEN) {
+        const modalToOpen = document.querySelector(MODAL_TO_OPEN);
+        if (modalToOpen) {
+            // Repopulate title based on action
+            const action = document.getElementById('formAddAction').value;
+            if (action === 'edit') {
+                document.getElementById('addTitle').textContent = 'Edit Collection';
+                
+                // --- MODIFIED: Repopulate originalEditData for "no changes" check on resubmit ---
+                originalEditData = {
+                    client_name: document.getElementById('client_name').value.toUpperCase().trim(),
+                    affiliation: document.getElementById('affiliation').value.trim(),
+                    amount: parseFloat(document.getElementById('amount').value || 0).toFixed(2),
+                    cash_received: parseFloat(document.getElementById('cash_received').value || 0).toFixed(2),
+                    mode_of_payment: document.getElementById('mode_of_payment').value
+                };
+                
+            } else {
+                document.getElementById('addTitle').textContent = 'New Collection';
+            }
+            modalToOpen.classList.add('active');
+        }
+    }
+});
 </script>
 </body>
 </html>

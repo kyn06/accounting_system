@@ -1,6 +1,12 @@
 <?php
 // transactions/receivables.php
 session_start();
+
+// PREVENT BROWSER CACHING
+header("Cache-Control: no-store, no-cache, must-revalidate, max-age=0");
+header("Pragma: no-cache");
+header("Expires: 0"); // Expire immediately
+
 require_once '../db.php'; // Assumes $conn (mysqli object) is created here
 
 // --- Include FPDF ---
@@ -16,9 +22,10 @@ if (!isset($_SESSION['user_id'])) { // Check user_id
     exit();
 }
 
-// Use name from session, fallback to username
-$current_display_name = $_SESSION['name'] ?? $_SESSION['username'] ?? 'User';
+// Use name from session, fallback to username, AND CONVERT TO UPPERCASE
+$current_display_name = strtoupper($_SESSION['name'] ?? $_SESSION['username'] ?? 'User');
 $role = $_SESSION['role'] ?? 'user';
+$is_admin = ($role === 'admin');
 
 // --- Enhanced FPDF Class (Keep as before) ---
 class PDF extends FPDF {
@@ -38,21 +45,25 @@ class PDF extends FPDF {
         foreach ($data as $row) {
             $this->SetFillColor($fill ? 245 : 255);
             for ($i = 0; $i < count($header); $i++) {
-                 $cellValue = $row[$i] ?? ''; $originalValue = $cellValue;
+                $cellValue = $row[$i] ?? ''; $originalValue = $cellValue;
                 if (function_exists('iconv') && mb_detect_encoding((string)$cellValue, 'UTF-8', true) && preg_match('/[^\x00-\x7F]/', (string)$cellValue)) {
                     $convertedValue = @iconv('UTF-8', 'cp1252//IGNORE', (string)$cellValue);
                     if ($convertedValue !== false) $cellValue = $convertedValue;
                 }
-                $cleanOriginalValue = preg_replace('/[^0-9.]/', '', $originalValue);
-                $align = 'L'; if (strpos((string)$originalValue, '₱') !== false) { $align = 'R'; } elseif (in_array($header[$i], ['Status'])) { $align = 'C'; }
-                $this->Cell($widths[$i], 6, (string)$cellValue, 'LR', 0, $align, true);
+                $cleanOriginalValue = preg_replace('/[^0-9.]/', '', (string)$originalValue); // Cast to string
+                $align = 'L';
+                if (strpos((string)$originalValue, '₱') !== false) { // Cast to string
+                    $align = 'R';
+                } elseif (in_array($header[$i], ['Status', 'In-Charge'])) { // Center Status and In-Charge
+                    $align = 'C';
+                }
+                $this->Cell($widths[$i], 6, (string)$cellValue, 'LR', 0, $align, true); // Cast to string
             }
             $this->Ln();
             $fill = !$fill;
         }
         $this->Cell(array_sum($widths), 0, '', 'T'); $this->Ln(4);
     }
-
     function CalculateWidths($header, $data) {
         $num_cols = count($header);
         $pageWidth = $this->GetPageWidth() - $this->lMargin - $this->rMargin;
@@ -60,7 +71,7 @@ class PDF extends FPDF {
         for ($i = 0; $i < $num_cols; $i++) { $widths[$i] = $this->GetStringWidth($header[$i]) + 8; }
         $sampleData = array_slice($data, 0, 30);
         foreach ($sampleData as $row) {
-             if (!is_array($row)) continue;
+            if (!is_array($row)) continue;
             for ($i = 0; $i < $num_cols; $i++) {
                 $cellValue = $row[$i] ?? '';
                 if (function_exists('iconv') && mb_detect_encoding((string)$cellValue, 'UTF-8', true) && preg_match('/[^\x00-\x7F]/', (string)$cellValue)) {
@@ -85,13 +96,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     function required($key) { return isset($_POST[$key]) && trim((string)$_POST[$key]) !== ''; } // Helper
 
     // --- PDF Generation Action ---
-     if ($action === 'generate_current_view_pdf') {
-        if (defined('FPDF_MISSING') || !file_exists($fpdf_path)) { die("FPDF library not found."); }
+    if ($action === 'generate_current_view_pdf') {
+        if (defined('FPDF_MISSING') || !file_exists($fpdf_path)) {
+            echo "Error: The PDF library (FPDF) is missing from the server. Please contact an administrator.";
+            exit();
+        }
 
         $jsonData = $_POST['pdf_data'] ?? '[]';
         $data = json_decode($jsonData, true);
         $filters = json_decode($_POST['pdf_filters'] ?? '{}', true);
-        if (json_last_error() !== JSON_ERROR_NONE) { die("Error decoding PDF data: ".json_last_error_msg()); }
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            echo "Error: Could not read the data from the page. It may be corrupted. Error: ".json_last_error_msg();
+            exit();
+        }
 
         $pdf = new PDF('L', 'mm', 'A4'); // Landscape
         $pdf->AliasNbPages();
@@ -106,23 +123,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $sortKeyLabel = str_replace(['_','only'], [' ',''], $filters['sortKey'] ?? 'Default');
         $periodLabel .= " | Sorted By: " . ucwords($sortKeyLabel) . " " . ($filters['sortAsc'] ? '(Asc)' : '(Desc)');
 
-        $pdf->setReportHeader($reportTitle, $periodLabel, $current_display_name); // Use display name
+        $pdf->setReportHeader($reportTitle, $periodLabel, $current_display_name);
         $pdf->AddPage();
         $pdf->SetFont('Arial', '', 8);
 
         if (!empty($data)) {
-            // Header for PDF (can choose to include Origin Ref or not)
-            $header = ['Date Created', 'Client', 'Affiliation', 'Ref #', 'Amount', 'Paid', 'Balance', 'Mode', 'Status'];
+            $header = ['Date Created', 'Client', 'Affiliation', 'Ref #', 'Amount', 'Paid', 'Balance', 'In-Charge', 'Status'];
             $table_data = [];
             $total_amount = 0; $total_paid = 0; $total_balance = 0;
 
             foreach ($data as $row) {
-                // Data mapping for PDF - ensure indices match the PDF header array
                 $rowData = [
                     $row['date'] ?? '', $row['client'] ?? '', $row['affiliation'] ?? '', $row['ref'] ?? '',
                     $row['amount_display'] ?? '₱ 0.00', $row['paid_display'] ?? '₱ 0.00',
-                    $row['balance_display'] ?? '₱ 0.00', $row['mode'] ?? '', $row['status'] ?? '',
-                    // $row['origin_ref'] ?? '' // Excluded Origin Ref from PDF for now
+                    $row['balance_display'] ?? '₱ 0.00',
+                    $row['incharge'] ?? '', // Added
+                    $row['status'] ?? '',
                 ];
                 $table_data[] = $rowData;
                 $total_amount += $row['amount'] ?? 0; $total_paid += $row['paid'] ?? 0; $total_balance += $row['balance'] ?? 0;
@@ -135,11 +151,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $totalAmountStr = 'Total Amount: ₱ ' . number_format($total_amount, 2);
             $totalPaidStr = 'Total Paid: ₱ ' . number_format($total_paid, 2);
             $totalBalanceStr = 'Total Outstanding Balance: ₱ ' . number_format($total_balance, 2);
-             if (function_exists('iconv')) {
+            if (function_exists('iconv')) {
                 $totalAmountStr = @iconv('UTF-8', 'cp1252//IGNORE', $totalAmountStr) ?: $totalAmountStr;
                 $totalPaidStr = @iconv('UTF-8', 'cp1252//IGNORE', $totalPaidStr) ?: $totalPaidStr;
                 $totalBalanceStr = @iconv('UTF-8', 'cp1252//IGNORE', $totalBalanceStr) ?: $totalBalanceStr;
-             }
+            }
             $pdf->Cell(0, 6, $totalAmountStr, 0, 1, 'R');
             $pdf->Cell(0, 6, $totalPaidStr, 0, 1, 'R');
             $pdf->Cell(0, 6, $totalBalanceStr, 0, 1, 'R');
@@ -156,212 +172,309 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
     // --- End PDF Generation ---
 
-    // ===================================
-    // --- START: UPDATED 'ADD' LOGIC ---
-    // ===================================
     elseif ($action === 'add') {
-        if (required('client_name') && isset($_POST['amount'])) {
-            $client_name = trim($_POST['client_name']);
-            $affiliation = trim($_POST['affiliation'] ?? '');
-            $amount = (float)($_POST['amount'] ?? 0);
-            $amount_paid = (float)($_POST['amount_paid'] ?? 0);
-            $mode_of_payment = trim($_POST['mode_of_payment'] ?? '');
-            $created_at_dt = date('Y-m-d H:i:s');
-            $person_in_charge = $current_display_name;
+        // Validation
+        if (!required('client_name') || !isset($_POST['amount'])) {
+            $_SESSION['error_message'] = "Please fill in all required fields: Client Name and Amount.";
+            $_SESSION['form_data'] = $_POST; // MODIFIED: Keep form data
+            header("Location: receivables.php"); exit();
+        }
 
-             if ($amount <= 0) { $_SESSION['error_message'] = "Amount must be > 0."; header("Location: receivables.php"); exit(); }
-             if ($amount_paid < 0 || $amount_paid > $amount + 0.009) { $_SESSION['error_message'] = "Invalid initial amount paid."; header("Location: receivables.php"); exit(); }
-             if ($amount_paid > 0.009 && empty($mode_of_payment)) { $_SESSION['error_message'] = "Mode of Payment required for initial payment."; header("Location: receivables.php"); exit(); }
+        $client_name = strtoupper(trim($_POST['client_name']));
+        $affiliation = trim($_POST['affiliation'] ?? ''); // Affiliation is optional
+        $amount = (float)($_POST['amount'] ?? 0);
+        $amount_paid = (float)($_POST['amount_paid'] ?? 0);
+        $mode_of_payment_initial = trim($_POST['mode_of_payment'] ?? '');
+        $created_at_dt = date('Y-m-d H:i:s');
+        $person_in_charge = $current_display_name;
 
-            $conn->begin_transaction();
-            $new_receivable_id = null; $new_collection_id = null;
+        // MODIFIED: More user-friendly validation
+        if ($amount <= 0) {
+            $_SESSION['error_message'] = "The 'Amount' must be a positive number (greater than 0).";
+            $_SESSION['form_data'] = $_POST; // MODIFIED: Keep form data
+            header("Location: receivables.php"); exit();
+        }
+        if ($amount_paid < 0) {
+             $_SESSION['error_message'] = "The 'Amount Paid' cannot be a negative number.";
+             $_SESSION['form_data'] = $_POST; // MODIFIED: Keep form data
+             header("Location: receivables.php"); exit();
+        }
+        if ($amount_paid > $amount + 0.009) {
+            $_SESSION['error_message'] = "The 'Amount Paid' (₱" . number_format($amount_paid, 2) . ") cannot be more than the total 'Amount' (₱" . number_format($amount, 2) . ").";
+            $_SESSION['form_data'] = $_POST; // MODIFIED: Keep form data
+            header("Location: receivables.php"); exit();
+        }
+        if ($amount_paid > 0.009 && empty($mode_of_payment_initial)) {
+            $_SESSION['error_message'] = "Please select a 'Mode of Payment' when adding an initial payment.";
+            $_SESSION['form_data'] = $_POST; // MODIFIED: Keep form data
+            header("Location: receivables.php"); exit();
+        }
 
-            try {
-                // 1. Insert into receivables (assuming PK is rec_id)
-                $receivable_ref = "RCV-" . date('YmdHis') . "-" . rand(1000, 9999);
-                $balance = $amount - $amount_paid;
-                $is_paid = ($balance <= 0.009) ? 1 : 0;
-                $stmt_recv = $conn->prepare("INSERT INTO receivables (client_name, affiliation, amount, amount_paid, mode_of_payment, is_paid, created_at, reference_number) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
-                 if (!$stmt_recv) throw new Exception("Prepare failed (receivables): " . $conn->error);
-                // types: client_name(s), affiliation(s), amount(d), amount_paid(d), mode_of_payment(s), is_paid(i), created_at(s), reference_number(s)
-                $stmt_recv->bind_param("ssddsiss", $client_name, $affiliation, $amount, $amount_paid, $mode_of_payment, $is_paid, $created_at_dt, $receivable_ref);
-                if (!$stmt_recv->execute()) throw new Exception("Execute failed (receivables): " . $stmt_recv->error);
-                $new_receivable_id = $conn->insert_id; // Get ID (assuming it's rec_id)
-                $stmt_recv->close();
+        $conn->begin_transaction();
+        $new_receivable_id = null; $new_collection_id = null;
+        $receivable_ref = "RCV-" . date('YmdHis') . "-" . rand(1000, 9999);
 
-                // 2. If initial payment exists, insert into collections and link
-                if ($amount_paid > 0.009) {
-                    $collection_ref = "COLL-" . date("YmdHis") . "-" . rand(1000, 9999);
-                    // Assuming PK is coll_id
-                    $stmt_coll = $conn->prepare("INSERT INTO collections (client_name, affiliation, reference_number, amount, cash_received, mode_of_payment, person_in_charge, created_at, transaction_datetime) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
-                     if (!$stmt_coll) throw new Exception("Prepare failed (collections): " . $conn->error);
-                    $stmt_coll->bind_param("sssddssss", $client_name, $affiliation, $collection_ref, $amount_paid, $amount_paid, $mode_of_payment, $person_in_charge, $created_at_dt, $created_at_dt);
-                    if (!$stmt_coll->execute()) throw new Exception("Execute failed (collections): " . $stmt_coll->error);
-                    $new_collection_id = $conn->insert_id; // Get ID (assuming it's coll_id)
-                    $stmt_coll->close();
+        try {
+            $balance = $amount - $amount_paid;
+            $is_paid = ($balance <= 0.009) ? 1 : 0;
 
-                    // Insert into linking table
-                    $stmt_link = $conn->prepare("INSERT INTO coll_rec_link (coll_id, rec_id) VALUES (?, ?)");
-                    if (!$stmt_link) throw new Exception("Prepare failed (link): " . $conn->error);
-                    $stmt_link->bind_param("ii", $new_collection_id, $new_receivable_id);
-                    if (!$stmt_link->execute()) throw new Exception("Execute failed (link): " . $stmt_link->error);
-                    $stmt_link->close();
-                    $_SESSION['success_message'] = "Receivable added & initial payment linked.";
-                } else {
-                     $_SESSION['success_message'] = "Receivable added.";
-                }
-                $conn->commit();
-            } catch (Exception $e) {
-                $conn->rollback(); $_SESSION['error_message'] = "Transaction failed: " . $e->getMessage();
+            $stmt_recv = $conn->prepare("INSERT INTO receivables (client_name, affiliation, amount, amount_paid, person_in_charge, is_paid, created_at, reference_number, transaction_datetime) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
+            if (!$stmt_recv) throw new Exception("A database error occurred while preparing the receivable. Please try again.");
+            $stmt_recv->bind_param("ssddsisss", $client_name, $affiliation, $amount, $amount_paid, $person_in_charge, $is_paid, $created_at_dt, $receivable_ref, $created_at_dt);
+            if (!$stmt_recv->execute()) throw new Exception("A database error occurred while saving the receivable. Please check for duplicates and try again.");
+            $new_receivable_id = $conn->insert_id;
+            $stmt_recv->close();
+
+            if ($amount_paid > 0.009) {
+                $collection_ref = "COLL-" . date("YmdHis") . "-" . rand(1000, 9999);
+                $stmt_coll = $conn->prepare("INSERT INTO collections (client_name, affiliation, reference_number, amount, cash_received, mode_of_payment, person_in_charge, created_at, transaction_datetime) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
+                if (!$stmt_coll) throw new Exception("Database error: Could not prepare the initial payment record.");
+                $stmt_coll->bind_param("sssddssss", $client_name, $affiliation, $collection_ref, $amount_paid, $amount_paid, $mode_of_payment_initial, $person_in_charge, $created_at_dt, $created_at_dt);
+                if (!$stmt_coll->execute()) throw new Exception("Database error: Could not save the initial payment record.");
+                $new_collection_id = $conn->insert_id;
+                $stmt_coll->close();
+
+                $stmt_link = $conn->prepare("INSERT INTO coll_rec_link (coll_id, rec_id) VALUES (?, ?)");
+                if (!$stmt_link) throw new Exception("Database error: Could not link the payment to the receivable.");
+                $stmt_link->bind_param("ii", $new_collection_id, $new_receivable_id);
+                if (!$stmt_link->execute()) throw new Exception("Database error: Could not finalize the payment link.");
+                $stmt_link->close();
+                $_SESSION['success_message'] = "Receivable added and the initial payment was recorded successfully.";
+            } else {
+                $_SESSION['success_message'] = "Receivable added successfully.";
             }
-        } else { $_SESSION['error_message'] = "Client Name and Amount required."; }
-    // =================================
-    // --- END: UPDATED 'ADD' LOGIC ---
-    // =================================
+            $conn->commit();
+
+            // --- ADD LOGGING ---
+            try {
+                $log_user_id = $_SESSION['user_id'] ?? 0;
+                $log_username = $person_in_charge; // Already uppercase
+                $log_details = "User '{$log_username}' created Receivable {$receivable_ref} for '{$client_name}'. Amount: ₱" . number_format($amount, 2) . ($amount_paid > 0.009 ? " (Initial Payment: ₱".number_format($amount_paid, 2).")" : "");
+                $log_stmt = $conn->prepare("INSERT INTO transaction_logs (user_id, username, action_type, entity_type, entity_id, details, log_timestamp) VALUES (?, ?, 'CREATE', 'Receivable', ?, ?, ?)");
+                if ($log_stmt) {
+                    $log_stmt->bind_param("isiss", $log_user_id, $log_username, $new_receivable_id, $log_details, $created_at_dt);
+                    $log_stmt->execute();
+                    $log_stmt->close();
+                }
+            } catch (Exception $log_e) { /* Optional: Log error to file */ }
+            // --- END LOGGING ---
+
+        } catch (Exception $e) {
+            $conn->rollback();
+            $_SESSION['error_message'] = $e->getMessage(); // MODIFIED: Show the user-friendly exception message
+            $_SESSION['form_data'] = $_POST; // MODIFIED: Keep form data on transaction fail
+        }
     }
     elseif ($action === 'edit') {
-        // Use rec_id for WHERE clause
-        $rec_id = intval($_POST['rec_id'] ?? 0); // Changed from 'id' to 'rec_id'
+        $rec_id = intval($_POST['rec_id'] ?? 0);
         if ($rec_id <= 0 || !required('client_name') || !isset($_POST['amount'])) {
-             $_SESSION['error_message'] = "Missing required fields."; header("Location: receivables.php"); exit();
+            $_SESSION['error_message'] = "Could not edit. Required information (ID, Client Name, or Amount) was missing.";
+            $_SESSION['form_data'] = $_POST; // MODIFIED: Keep form data
+            header("Location: receivables.php"); exit();
         }
-        $client_name = trim($_POST['client_name']);
-        $affiliation = trim($_POST['affiliation'] ?? '');
+        
+        $client_name = strtoupper(trim($_POST['client_name']));
+        $affiliation = trim($_POST['affiliation'] ?? ''); // Affiliation is optional
         $new_amount = (float)($_POST['amount'] ?? 0);
-        $mode_of_payment = trim($_POST['mode_of_payment'] ?? '');
 
-         if ($new_amount <= 0) { $_SESSION['error_message'] = "Amount must be > 0."; header("Location: receivables.php"); exit(); }
+        if ($new_amount <= 0) {
+            $_SESSION['error_message'] = "The 'Amount' must be a positive number (greater than 0).";
+            $_SESSION['form_data'] = $_POST; // MODIFIED: Keep form data
+            header("Location: receivables.php"); exit();
+        }
 
         $current_paid = 0;
-        // Use rec_id in WHERE
         $stmt_select = $conn->prepare("SELECT amount_paid FROM receivables WHERE rec_id = ?");
         if ($stmt_select) {
             $stmt_select->bind_param("i", $rec_id); $stmt_select->execute(); $stmt_select->bind_result($current_paid); $stmt_select->fetch(); $stmt_select->close();
-        } else { $_SESSION['error_message'] = "Fetch failed."; header("Location: receivables.php"); exit(); }
-         if ($new_amount < $current_paid - 0.009) { $_SESSION['error_message'] = "New amount < already paid (₱" . number_format($current_paid, 2) . ")."; header("Location: receivables.php"); exit(); }
+        } else {
+            $_SESSION['error_message'] = "Could not find the original receivable record. It might have been deleted.";
+            $_SESSION['form_data'] = $_POST; // MODIFIED: Keep form data
+            header("Location: receivables.php"); exit();
+        }
+        
+        if ($new_amount < $current_paid - 0.009) {
+            $_SESSION['error_message'] = "The new 'Amount' (₱" . number_format($new_amount, 2) . ") cannot be less than the amount already paid (₱" . number_format($current_paid, 2) . ").";
+            $_SESSION['form_data'] = $_POST; // MODIFIED: Keep form data
+            header("Location: receivables.php"); exit();
+        }
 
-        // Check links before updating
         $link_count = 0;
         $stmt_check = $conn->prepare("SELECT COUNT(*) FROM coll_rec_link WHERE rec_id = ?");
         if($stmt_check){
             $stmt_check->bind_param("i", $rec_id); $stmt_check->execute(); $stmt_check->bind_result($link_count); $stmt_check->fetch(); $stmt_check->close();
-            if ($link_count > 0) { $_SESSION['warning_message'] = "Warning: Editing linked receivable. Verify linked collection amounts."; }
+            if ($link_count > 0) {
+                $_SESSION['warning_message'] = "This receivable is linked to {$link_count} payment(s). Please double-check that the linked collection records are still correct.";
+            }
         }
 
         $new_balance = $new_amount - $current_paid;
         $new_is_paid = ($new_balance <= 0.009) ? 1 : 0;
 
-        // Use rec_id in WHERE
-    $stmt_update = $conn->prepare("UPDATE receivables SET client_name = ?, affiliation = ?, amount = ?, mode_of_payment = ?, is_paid = ? WHERE rec_id = ?");
-    if ($stmt_update) {
-      // types: client_name(s), affiliation(s), amount(d), mode_of_payment(s), is_paid(i), rec_id(i)
-      $stmt_update->bind_param("ssdsii", $client_name, $affiliation, $new_amount, $mode_of_payment, $new_is_paid, $rec_id); // Use rec_id
-            if ($stmt_update->execute()) { $_SESSION['success_message'] = "Receivable updated."; }
-            else { $_SESSION['error_message'] = "Error updating: " . $stmt_update->error; }
-            $stmt_update->close();
-        } else { $_SESSION['error_message'] = "DB error: " . $conn->error; }
-    }
-    // ===================================
-    // --- START: UPDATED 'PAY' LOGIC ---
-    // ===================================
-    elseif ($action === 'pay') {
-        // Use rec_id
-        $rec_id_to_pay = (int)$_POST['rec_id'] ?? 0; // Changed from 'id'
-        if ($rec_id_to_pay > 0 && isset($_POST['paid_amount'])) {
-            $new_payment = (float)($_POST['paid_amount'] ?? 0);
-            $payment_time = date('Y-m-d H:i:s');
-            $person_in_charge = $current_display_name;
-            $payment_mode = trim($_POST['payment_mode'] ?? ''); // Get from pay modal if added
-
-             if ($new_payment <= 0) { $_SESSION['error_message'] = "Payment amount must be > 0."; header("Location: receivables.php"); exit(); }
-
-            $conn->begin_transaction();
-            $new_collection_id = null;
-
-            try {
-                // 1. Get receivable details & Lock row (use rec_id)
-                $current_amount = 0; $current_paid = 0; $client_name = ''; $affiliation = ''; $receivable_ref = ''; $original_mode = '';
-                $stmt_select = $conn->prepare("SELECT client_name, affiliation, amount, amount_paid, reference_number, mode_of_payment FROM receivables WHERE rec_id = ? FOR UPDATE");
-                if (!$stmt_select) throw new Exception("Prepare failed (select): ".$conn->error);
-                $stmt_select->bind_param("i", $rec_id_to_pay); // Use rec_id
-                if(!$stmt_select->execute()) throw new Exception("Execute failed (select): ".$stmt_select->error);
-                $stmt_select->bind_result($client_name, $affiliation, $current_amount, $current_paid, $receivable_ref, $original_mode);
-                if(!$stmt_select->fetch()){ throw new Exception("Receivable not found."); }
-                $stmt_select->close();
-
-                // Determine payment mode
-                $payment_mode_for_collection = !empty($payment_mode) ? $payment_mode : $original_mode;
-                if (empty($payment_mode_for_collection)) $payment_mode_for_collection = 'Cash'; // Default
-
-                 $current_balance = $current_amount - $current_paid;
-                 if ($new_payment > $current_balance + 0.009) { /* Allow overpayment for now */ }
-
-                // 2. Update receivable (use rec_id)
-                $new_total_paid = $current_paid + $new_payment;
-                $new_balance = $current_amount - $new_total_paid;
-                $new_is_paid = ($new_balance <= 0.009) ? 1 : 0;
-                $stmt_update = $conn->prepare("UPDATE receivables SET amount_paid = ?, is_paid = ? WHERE rec_id = ?");
-                 if (!$stmt_update) throw new Exception("Prepare failed (update): ".$conn->error);
-                $stmt_update->bind_param("dii", $new_total_paid, $new_is_paid, $rec_id_to_pay); // Use rec_id
-                if(!$stmt_update->execute()) throw new Exception("Execute failed (update): ".$stmt_update->error);
-                $stmt_update->close();
-
-                // 3. Insert into collections (assuming PK is coll_id)
-                $collection_ref = "COLL-" . date("YmdHis") . "-" . rand(1000, 9999);
-                $stmt_coll = $conn->prepare("INSERT INTO collections (client_name, affiliation, reference_number, amount, cash_received, mode_of_payment, person_in_charge, created_at, transaction_datetime) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
-                 if (!$stmt_coll) throw new Exception("Prepare failed (insert coll): " . $conn->error);
-                $stmt_coll->bind_param("sssddssss", $client_name, $affiliation, $collection_ref, $new_payment, $new_payment, $payment_mode_for_collection, $person_in_charge, $payment_time, $payment_time);
-                if(!$stmt_coll->execute()) throw new Exception("Execute failed (insert coll): ".$stmt_coll->error);
-                $new_collection_id = $conn->insert_id; // Get coll_id
-                $stmt_coll->close();
-
-                // 4. Insert into linking table
-                $stmt_link = $conn->prepare("INSERT INTO coll_rec_link (coll_id, rec_id) VALUES (?, ?)");
-                if (!$stmt_link) throw new Exception("Prepare failed (link): " . $conn->error);
-                $stmt_link->bind_param("ii", $new_collection_id, $rec_id_to_pay); // Link new collection to this receivable
-                if (!$stmt_link->execute()) throw new Exception("Execute failed (link): " . $stmt_link->error);
-                $stmt_link->close();
-
-                $conn->commit();
-                $_SESSION['success_message'] = "Payment recorded and linked.";
-            } catch (Exception $e) {
-                $conn->rollback(); $_SESSION['error_message'] = "Transaction failed: " . $e->getMessage();
+        $stmt_update = $conn->prepare("UPDATE receivables SET client_name = ?, affiliation = ?, amount = ?, is_paid = ?, person_in_charge = ?, transaction_datetime = NOW() WHERE rec_id = ?");
+        if ($stmt_update) {
+            $stmt_update->bind_param("ssdisi", $client_name, $affiliation, $new_amount, $new_is_paid, $current_display_name, $rec_id);
+            if ($stmt_update->execute()) {
+                $_SESSION['success_message'] = "Receivable updated successfully.";
+                // --- ADD LOGGING ---
+                try {
+                    $log_user_id = $_SESSION['user_id'] ?? 0;
+                    $log_username = $current_display_name; // Already uppercase
+                    $log_details = "User '{$log_username}' edited Receivable ID {$rec_id} ('{$client_name}'). New Amount: ₱" . number_format($new_amount, 2);
+                    $log_stmt = $conn->prepare("INSERT INTO transaction_logs (user_id, username, action_type, entity_type, entity_id, details) VALUES (?, ?, 'UPDATE', 'Receivable', ?, ?)");
+                    if ($log_stmt) {
+                        $log_stmt->bind_param("isis", $log_user_id, $log_username, $rec_id, $log_details);
+                        $log_stmt->execute();
+                        $log_stmt->close();
+                    }
+                } catch (Exception $log_e) { /* Optional: Log error to file */ }
+                // --- END LOGGING ---
             }
-        } else { $_SESSION['error_message'] = "Missing ID or payment amount."; }
-    // =================================
-    // --- END: UPDATED 'PAY' LOGIC ---
-    // =================================
+            else {
+                $_SESSION['error_message'] = "A database error occurred while updating. The changes were not saved.";
+                $_SESSION['form_data'] = $_POST; // MODIFIED: Keep form data
+            }
+            $stmt_update->close();
+        } else {
+            $_SESSION['error_message'] = "A database error occurred. Could not prepare the update.";
+            $_SESSION['form_data'] = $_POST; // MODIFIED: Keep form data
+        }
+    }
+    elseif ($action === 'pay') {
+        $rec_id_to_pay = (int)$_POST['rec_id'] ?? 0;
+        
+        // MODIFIED: Clearer validation messages
+        if ($rec_id_to_pay <= 0 || !isset($_POST['paid_amount'])) {
+            $_SESSION['error_message'] = "Could not record payment. The item ID or paid amount was missing.";
+            // Not persisting 'pay' modal data as it's simple to re-open
+            header("Location: receivables.php"); exit();
+        }
+        
+        $new_payment = (float)($_POST['paid_amount'] ?? 0);
+        $payment_time = date('Y-m-d H:i:s');
+        $person_in_charge = $current_display_name;
+        $payment_mode = trim($_POST['payment_mode'] ?? '');
+
+        if ($new_payment <= 0) {
+            $_SESSION['error_message'] = "The 'Amount to Pay' must be a positive number (greater than 0).";
+            header("Location: receivables.php"); exit(); // Not persisting
+        }
+        if (empty($payment_mode)) {
+            $_SESSION['error_message'] = "Please select a 'Mode of Payment' for this transaction.";
+            header("Location: receivables.php"); exit(); // Not persisting
+        }
+
+        $conn->begin_transaction();
+        $new_collection_id = null;
+        $client_name = ''; $new_balance = 0;
+
+        try {
+            $current_amount = 0; $current_paid = 0; $affiliation = ''; $receivable_ref = '';
+            $stmt_select = $conn->prepare("SELECT client_name, affiliation, amount, amount_paid, reference_number FROM receivables WHERE rec_id = ? FOR UPDATE");
+            if (!$stmt_select) throw new Exception("Database error: Could not find the receivable.");
+            $stmt_select->bind_param("i", $rec_id_to_pay);
+            if(!$stmt_select->execute()) throw new Exception("Database error: Could not access the receivable record.");
+            $stmt_select->bind_result($client_name, $affiliation, $current_amount, $current_paid, $receivable_ref);
+            if(!$stmt_select->fetch()){ throw new Exception("Receivable not found. It might have been deleted by another user."); }
+            $stmt_select->close();
+
+            $payment_mode_for_collection = $payment_mode; 
+
+            $current_balance = $current_amount - $current_paid;
+            if ($new_payment > $current_balance + 0.009) {
+                $_SESSION['warning_message'] = "The payment of ₱" . number_format($new_payment, 2) . " was more than the balance of ₱" . number_format($current_balance, 2) . ". The receivable is now marked as paid.";
+            }
+
+            $new_total_paid = $current_paid + $new_payment;
+            $new_balance = $current_amount - $new_total_paid;
+            $new_is_paid = ($new_balance <= 0.009) ? 1 : 0;
+            $stmt_update = $conn->prepare("UPDATE receivables SET amount_paid = ?, is_paid = ?, transaction_datetime = ? WHERE rec_id = ?");
+            if (!$stmt_update) throw new Exception("Database error: Could not prepare to update the balance.");
+            $stmt_update->bind_param("disi", $new_total_paid, $new_is_paid, $payment_time, $rec_id_to_pay);
+            if(!$stmt_update->execute()) throw new Exception("Database error: Could not save the new balance.");
+            $stmt_update->close();
+
+            $collection_ref = "COLL-" . date("YmdHis") . "-" . rand(1000, 9999);
+            $stmt_coll = $conn->prepare("INSERT INTO collections (client_name, affiliation, reference_number, amount, cash_received, mode_of_payment, person_in_charge, created_at, transaction_datetime) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
+            if (!$stmt_coll) throw new Exception("Database error: Could not prepare to save the payment record.");
+            $stmt_coll->bind_param("sssddssss", $client_name, $affiliation, $collection_ref, $new_payment, $new_payment, $payment_mode_for_collection, $person_in_charge, $payment_time, $payment_time);
+            if(!$stmt_coll->execute()) throw new Exception("Database error: Could not save the payment record.");
+            $new_collection_id = $conn->insert_id;
+            $stmt_coll->close();
+
+            $stmt_link = $conn->prepare("INSERT INTO coll_rec_link (coll_id, rec_id) VALUES (?, ?)");
+            if (!$stmt_link) throw new Exception("Database error: Could not prepare to link the payment.");
+            $stmt_link->bind_param("ii", $new_collection_id, $rec_id_to_pay);
+            if (!$stmt_link->execute()) throw new Exception("Database error: Could not finalize the payment link.");
+            $stmt_link->close();
+
+            $conn->commit();
+            $_SESSION['success_message'] = "Payment of ₱" . number_format($new_payment, 2) . " was recorded successfully.";
+
+            // --- ADD LOGGING for PAYMENT ---
+            try {
+                $log_user_id = $_SESSION['user_id'] ?? 0;
+                $log_username = $person_in_charge; // Already uppercase
+                $log_details = "User '{$log_username}' recorded payment of ₱" . number_format($new_payment, 2) . " for Receivable ID {$rec_id_to_pay} ('{$client_name}'). New Balance: ₱" . number_format($new_balance, 2) . ".";
+                $log_stmt = $conn->prepare("INSERT INTO transaction_logs (user_id, username, action_type, entity_type, entity_id, details, log_timestamp) VALUES (?, ?, 'PAY', 'Receivable', ?, ?, ?)");
+                if ($log_stmt) {
+                    $log_stmt->bind_param("isiss", $log_user_id, $log_username, $rec_id_to_pay, $log_details, $payment_time);
+                    $log_stmt->execute();
+                    $log_stmt->close();
+                }
+            } catch (Exception $log_e) { /* Optional: Log error to file */ }
+            // --- END LOGGING ---
+
+        } catch (Exception $e) {
+            $conn->rollback();
+            $_SESSION['error_message'] = $e->getMessage(); // MODIFIED: Show the user-friendly exception message
+        }
     }
     elseif ($action === 'delete') {
-         // Use rec_id
-        $rec_id = intval($_POST['rec_id'] ?? 0); // Changed from 'id'
+        $rec_id = intval($_POST['rec_id'] ?? 0);
         if ($rec_id > 0) {
-            // Check links (optional, CASCADE handles link table)
-             $link_count = 0;
-            $stmt_check = $conn->prepare("SELECT COUNT(*) FROM collection_receivable_link WHERE rec_id = ?");
+            // --- ADD LOGGING ---
+            try {
+                $ref_num_log = 'ID ' . $rec_id; $client_name_log = 'Unknown Client';
+                $stmt_get = $conn->prepare("SELECT reference_number, client_name FROM receivables WHERE rec_id = ?");
+                if($stmt_get){
+                    $stmt_get->bind_param("i", $rec_id);
+                    if($stmt_get->execute()) { $stmt_get->bind_result($ref_num_log, $client_name_log); $stmt_get->fetch(); }
+                    $stmt_get->close();
+                }
+                $log_user_id = $_SESSION['user_id'] ?? 0; $log_username = $current_display_name; // Already uppercase
+                $log_details = "User '{$log_username}' DELETED Receivable '{$ref_num_log}' for client '" . strtoupper($client_name_log) . "'."; // Ensure log name is upper
+                $log_stmt = $conn->prepare("INSERT INTO transaction_logs (user_id, username, action_type, entity_type, entity_id, details) VALUES (?, ?, 'DELETE', 'Receivable', ?, ?)");
+                if ($log_stmt) { $log_stmt->bind_param("isis", $log_user_id, $log_username, $rec_id, $log_details); $log_stmt->execute(); $log_stmt->close(); }
+            } catch (Exception $log_e) { /* Optional: Log error to file */ }
+            // --- END LOGGING ---
+
+            $link_count = 0;
+            $stmt_check = $conn->prepare("SELECT COUNT(*) FROM coll_rec_link WHERE rec_id = ?");
             if($stmt_check){
                 $stmt_check->bind_param("i", $rec_id); $stmt_check->execute(); $stmt_check->bind_result($link_count); $stmt_check->fetch(); $stmt_check->close();
-                if ($link_count > 0) { $_SESSION['warning_message'] = "Warning: Deleting linked receivable. Related collections remain."; }
+                if ($link_count > 0) { $_SESSION['warning_message'] = "Warning: This receivable was linked to {$link_count} payment(s). The original payment record(s) in 'Collections' were NOT deleted."; }
             }
 
-            // Use rec_id
             $stmt = $conn->prepare("DELETE FROM receivables WHERE rec_id = ?");
             if ($stmt) {
-                $stmt->bind_param("i", $rec_id); // Use rec_id
-                if ($stmt->execute()) { $_SESSION['success_message'] = "Receivable deleted."; }
-                else { $_SESSION['error_message'] = "Error deleting: " . $stmt->error; }
+                $stmt->bind_param("i", $rec_id);
+                if ($stmt->execute()) { $_SESSION['success_message'] = "Receivable deleted successfully."; }
+                else { $_SESSION['error_message'] = "Error: Could not delete the receivable. It might be linked to other records."; }
                 $stmt->close();
-            } else { $_SESSION['error_message'] = "DB error: " . $conn->error; }
-        } else { $_SESSION['error_message'] = "Invalid ID."; }
+            } else {
+                $_SESSION['error_message'] = "A database error occurred. Could not prepare the delete operation.";
+            }
+        } else { $_SESSION['error_message'] = "Invalid ID. The item could not be found to delete."; }
     }
 
     header("Location: receivables.php");
     exit();
 }
 
-// Fetch initial data - Make sure 'rec_id' is selected
+// === Fetch initial data - ADDED person_in_charge ===
 $receivables_q = $conn->query("
-    SELECT rec_id, client_name, affiliation, amount, amount_paid, mode_of_payment, is_paid, created_at, reference_number,
+    SELECT rec_id, client_name, affiliation, amount, amount_paid, person_in_charge, is_paid, created_at, reference_number,
            IFNULL(amount_paid,0) AS total_paid,
            (amount - IFNULL(amount_paid,0)) AS balance,
            DATE(created_at) as date_created_only
@@ -373,6 +486,15 @@ $error_message = $_SESSION['error_message'] ?? null;
 $success_message = $_SESSION['success_message'] ?? null;
 $warning_message = $_SESSION['warning_message'] ?? null;
 unset($_SESSION['error_message'], $_SESSION['success_message'], $_SESSION['warning_message']);
+
+// **NEW**: Get form data for repopulating modal
+$form_data = $_SESSION['form_data'] ?? null;
+$form_action = $form_data['action'] ?? null;
+unset($_SESSION['form_data']);
+
+if ($receivables_q === false && !$error_message) {
+    $error_message = "A database error occurred while loading receivables. Please refresh the page.";
+}
 
 ?>
 <!doctype html>
@@ -438,6 +560,8 @@ tr:hover{background:#fff6f9}
 .modal form label { font-size: 14px; font-weight: 600; color: var(--muted); display: block; margin-top: 15px; margin-bottom: 5px; }
 .modal form input, .modal form select { width: 100%; padding: 12px 15px; margin-bottom: 12px; border: 1px solid #ddd; border-radius: 8px; background: #f9f9f9; font-size: 14px; transition: all 0.2s ease; font-family:"Poppins",sans-serif; }
 .modal form input:focus, .modal form select:focus { outline: none; border-color: var(--accent); background: #fff; box-shadow: 0 0 0 3px rgba(216, 76, 115, 0.15); }
+/* MODIFIED: Add style for uppercase input */
+.modal form input[name="client_name"] { text-transform: uppercase; }
 .modal .actions { display: flex; justify-content: flex-end; margin-top: 25px; gap: 10px; }
 @keyframes fadeIn { from { opacity: 0; transform: scale(0.95); } to { opacity: 1; transform: scale(1); } }
 @keyframes slideUp { from { transform: translateY(15px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
@@ -447,156 +571,166 @@ tr:hover{background:#fff6f9}
 </head>
 <body>
 <aside class="sidebar">
-  <nav class="side-menu">
-    <?php if ($role === 'admin'): ?>
-    <a href="../dashboard.php"><i class="fa fa-chart-pie"></i><span class="label">Dashboard</span></a>
-    <?php endif; ?>
-    <a href="collections.php"><i class="fa fa-cash-register"></i><span class="label">Transactions</span></a>
-    <?php if ($role === 'admin'): ?>
-    <a href="../users.php"><i class="fa fa-users-cog"></i><span class="label">Users</span></a>
-    <?php endif; ?>
-    <a href="../logout.php"><i class="fa fa-sign-out-alt"></i><span class="label">Logout</span></a>
-  </nav>
+    <nav class="side-menu">
+        <?php if ($role === 'admin'): ?>
+        <a href="../dashboard.php"><i class="fa fa-chart-pie"></i><span class="label">Dashboard</span></a>
+        <?php endif; ?>
+        <a href="collections.php"><i class="fa fa-cash-register"></i><span class="label">Transactions</span></a>
+        <?php if ($role === 'admin'): ?>
+        <a href="../users.php"><i class="fa fa-users-cog"></i><span class="label">Users</span></a>
+        <?php endif; ?>
+        <a href="../logout.php"><i class="fa fa-sign-out-alt"></i><span class="label">Logout</span></a>
+    </nav>
 </aside>
 
 <main class="main">
-  <div class="header">
-    <h1>Receivables</h1>
-    <div class="user-info">Logged in as: <b><?= htmlspecialchars($current_display_name) ?></b></div>
-  </div>
-
-  <div class="top-tabs">
-    <div class="tab" onclick="location.href='collections.php'">Collections</div>
-    <div class="tab active">Receivables</div>
-    <div class="tab" onclick="location.href='expenses.php'">Expenses</div>
-  </div>
-
-  <div class="toolbar">
-    <input type="text" id="searchInput" placeholder="🔍 Search...">
-    <button class="btn primary" id="openAddBtn"><i class="fa fa-plus"></i> New Receivable</button>
-    <button class="btn small" id="showPendingBtn"><i class="fa fa-clock"></i> Pending Only</button>
-    <button class="btn small" id="generatePdfBtn" style="margin-left: 10px;"><i class="fa fa-file-pdf"></i> PDF Current View</button>
-    <div style="margin-left:auto">
-      <input type="number" id="rowsPerPageInput" placeholder="Rows / page" style="width:120px;padding:8px;border-radius:8px;border:1px solid #ddd" value="8" min="1">
+    <div class="header">
+        <h1>Receivables</h1>
+        <div class="user-info">Logged in as: <b><?= htmlspecialchars($current_display_name) ?></b></div>
     </div>
-  </div>
 
-  <div class="table-card">
-    <table id="receivablesTable">
-      <thead>
-        <tr>
-          <th data-key="date_created_only">Date Created <i class="fa fa-sort sort-icon"></i></th>
-          <th data-key="client_name">Client <i class="fa fa-sort sort-icon"></i></th>
-          <th data-key="affiliation">Affiliation <i class="fa fa-sort sort-icon"></i></th>
-          <th data-key="reference_number">Ref # <i class="fa fa-sort sort-icon"></i></th>
-          <th data-key="amount">Amount <i class="fa fa-sort sort-icon"></i></th>
-          <th data-key="total_paid">Paid <i class="fa fa-sort sort-icon"></i></th>
-          <th data-key="balance">Balance <i class="fa fa-sort sort-icon"></i></th>
-          <th data-key="mode_of_payment">Mode <i class="fa fa-sort sort-icon"></i></th>
-          <th data-key="is_paid">Status <i class="fa fa-sort sort-icon"></i></th>
-          <th>Action</th>
-        </tr>
-      </thead>
-      <tbody>
-        <?php
-        // Check if query was successful
-         if ($receivables_q) {
-            while ($r = $receivables_q->fetch_assoc()):
-                // Ensure primary key exists (assuming rec_id)
-                $primary_key = $r['rec_id'] ?? null;
-                if ($primary_key === null) continue; // Skip if no PK
+    <div class="top-tabs">
+        <div class="tab" onclick="location.href='collections.php'">Collections</div>
+        <div class="tab active">Receivables</div>
+        <div class="tab" onclick="location.href='expenses.php'">Expenses</div>
+        <?php if ($is_admin): ?>
+            <div class="tab" onclick="location.href='transaction_logs.php'">Logs</div>
+        <?php endif; ?>
+    </div>
 
-                $data = htmlentities(json_encode($r), ENT_QUOTES, 'UTF-8');
-                $is_paid = intval($r['is_paid']);
-                $row_class = $is_paid ? '' : 'unpaid-row';
-                $date_formatted = !empty($r['date_created_only']) ? date('M d, Y', strtotime($r['date_created_only'])) : '';
-                $status_text = $is_paid ? 'Paid' : 'Pending';
-                $status_class = $is_paid ? 'status-paid' : 'status-pending';
-        ?>
-          <tr class="<?= $row_class ?>" data-row='<?= $data ?>'>
-            <td><?= $date_formatted ?></td>
-            <td><?= htmlspecialchars($r['client_name']) ?></td>
-            <td><?= htmlspecialchars($r['affiliation']) ?></td>
-            <td><?= htmlspecialchars($r['reference_number']) ?></td>
-            <td>₱<?= number_format($r['amount'],2) ?></td>
-            <td>₱<?= number_format($r['total_paid'],2) ?></td>
-            <td>₱<?= number_format($r['balance'],2) ?></td>
-            <td><?= htmlspecialchars($r['mode_of_payment']) ?></td>
-            <td><span class="<?= $status_class ?>"><?= $status_text ?></span></td>
-            <td>
-              <?php if (!$is_paid): ?>
-                <button class="icon-btn payBtn" title="Record payment"><i class="fa fa-money-bill"></i></button>
-              <?php endif; ?>
-              <button class="icon-btn editBtn" title="Edit"><i class="fa fa-pen"></i></button>
-              <button class="icon-btn deleteBtn" title="Delete"><i class="fa fa-trash"></i></button>
-            </td>
-          </tr>
-        <?php
-            endwhile;
-            // $receivables_q->free(); // Free result set if using object approach
-         } else {
-             echo "<tr><td colspan='10'>Error fetching data: " . $conn->error . "</td></tr>";
-         }
-         ?>
-      </tbody>
-    </table>
-    <div class="pagination" id="pagination"></div>
-  </div>
+    <div class="toolbar">
+        <input type="text" id="searchInput" placeholder="🔍 Search...">
+        <button class="btn primary" id="openAddBtn"><i class="fa fa-plus"></i> New Receivable</button>
+        <button class="btn small" id="showPendingBtn"><i class="fa fa-clock"></i> Pending Only</button>
+        <button class="btn small" id="generatePdfBtn" style="margin-left: 10px;"><i class="fa fa-file-pdf"></i> PDF Current View</button>
+        <div style="margin-left:auto">
+            <input type="number" id="rowsPerPageInput" placeholder="Rows / page" style="width:120px;padding:8px;border-radius:8px;border:1px solid #ddd" value="8" min="1">
+        </div>
+    </div>
+
+    <div class="table-card">
+        <table id="receivablesTable">
+            <thead>
+                <tr>
+                    <th data-key="date_created_only">Date Created <i class="fa fa-sort sort-icon"></i></th>
+                    <th data-key="client_name">Client <i class="fa fa-sort sort-icon"></i></th>
+                    <th data-key="affiliation">Affiliation <i class="fa fa-sort sort-icon"></i></th>
+                    <th data-key="reference_number">Ref # <i class="fa fa-sort sort-icon"></i></th>
+                    <th data-key="amount">Amount <i class="fa fa-sort sort-icon"></i></th>
+                    <th data-key="total_paid">Paid <i class="fa fa-sort sort-icon"></i></th>
+                    <th data-key="balance">Balance <i class="fa fa-sort sort-icon"></i></th>
+                    <th data-key="person_in_charge">In-Charge <i class="fa fa-sort sort-icon"></i></th> 
+                    <th data-key="is_paid">Status <i class="fa fa-sort sort-icon"></i></th>
+                    <th>Action</th>
+                </tr>
+            </thead>
+            <tbody>
+                <?php
+                if ($receivables_q) {
+                    while ($r = $receivables_q->fetch_assoc()):
+                        $primary_key = $r['rec_id'] ?? null;
+                        if ($primary_key === null) continue;
+
+                        $data = htmlentities(json_encode($r), ENT_QUOTES, 'UTF-8');
+                        $is_paid = intval($r['is_paid']);
+                        $row_class = $is_paid ? '' : 'unpaid-row';
+                        $date_formatted = !empty($r['date_created_only']) ? date('M d, Y', strtotime($r['date_created_only'])) : '';
+                        $status_text = $is_paid ? 'Paid' : 'Pending';
+                        $status_class = $is_paid ? 'status-paid' : 'status-pending';
+                ?>
+                <tr class="<?= $row_class ?>" data-row='<?= $data ?>'>
+                    <td><?= $date_formatted ?></td>
+                    <td><?= htmlspecialchars(strtoupper($r['client_name'])) ?></td>
+                    <td><?= htmlspecialchars($r['affiliation']) ?></td>
+                    <td><?= htmlspecialchars($r['reference_number']) ?></td>
+                    <td>₱<?= number_format($r['amount'],2) ?></td>
+                    <td>₱<?= number_format($r['total_paid'],2) ?></td>
+                    <td>₱<?= number_format($r['balance'],2) ?></td>
+                    <td><?= htmlspecialchars(strtoupper($r['person_in_charge'])) ?></td> 
+                    <td><span class="<?= $status_class ?>"><?= $status_text ?></span></td>
+                    <td>
+                        <?php if (!$is_paid): ?>
+                            <button class="icon-btn payBtn" title="Record payment"><i class="fa fa-money-bill"></i></button>
+                        <?php endif; ?>
+                        <button class="icon-btn editBtn" title="Edit"><i class="fa fa-pen"></i></button>
+                        <?php if ($is_admin): ?>
+                            <button class="icon-btn deleteBtn" title="Delete"><i class="fa fa-trash"></i></button>
+                        <?php endif; ?>
+                    </td>
+                </tr>
+                <?php
+                    endwhile;
+                    $receivables_q->free();
+                } else {
+                    echo "<tr><td colspan='10' style='text-align:center;color:var(--danger);'>Could not load data. An error was reported.</td></tr>";
+                }
+                ?>
+            </tbody>
+        </table>
+        <div class="pagination" id="pagination"></div>
+    </div>
 </main>
 
-<div class="modal" id="modalAdd">
-  <div class="modal-content">
-    <h2 id="addTitle">New Receivable</h2>
-    <form method="post" id="formAdd" action="receivables.php">
-      <input type="hidden" name="action" id="formAddAction" value="add">
-      <input type="hidden" name="rec_id" id="formAddId" value="">
-      <label>Client Name</label>
-      <input type="text" name="client_name" id="client_name" required>
-      <label>Affiliation</label>
-      <input type="text" name="affiliation" id="affiliation">
-      <label>Amount</label>
-      <input type="number" step="0.01" name="amount" id="amount" required min="0.01">
-      <label>Amount Paid (optional)</label>
-      <input type="number" step="0.01" name="amount_paid" id="amount_paid" placeholder="0.00" min="0">
-      <label>Mode of Payment (for initial payment)</label>
-      <select name="mode_of_payment" id="mode_of_payment">
-        <option value="">-- Select --</option>
-        <option value="Cash">Cash</option>
-        <option value="Gcash">Gcash</option>
-        <option value="Bank">Bank</option>
-         <option value="Other">Other</option>
-      </select>
-      <div class="actions">
-        <button type="button" class="btn" id="closeAdd">Cancel</button>
-        <button type="submit" class="btn primary">Save</button>
-      </div>
-    </form>
-  </div>
+<div class="modal <?= ($form_action === 'add' || $form_action === 'edit') ? 'active' : '' ?>" id="modalAdd">
+    <div class="modal-content">
+        <h2 id="addTitle"><?= ($form_action === 'edit') ? 'Edit Receivable' : 'New Receivable' ?></h2>
+        <form method="post" id="formAdd" action="receivables.php">
+            <input type="hidden" name="action" id="formAddAction" value="<?= htmlspecialchars($form_action ?? 'add') ?>">
+            <input type="hidden" name="rec_id" id="formAddId" value="<?= htmlspecialchars($form_data['rec_id'] ?? '') ?>">
+            
+            <label>Client Name</label>
+            <input type="text" name="client_name" id="client_name" value="<?= htmlspecialchars($form_data['client_name'] ?? '') ?>" required>
+            
+            <label>Affiliation (Optional)</label>
+            <input type="text" name="affiliation" id="affiliation" value="<?= htmlspecialchars($form_data['affiliation'] ?? '') ?>">
+            
+            <label>Amount</label>
+            <input type="number" step="0.01" name="amount" id="amount" value="<?= htmlspecialchars($form_data['amount'] ?? '') ?>" required min="0.01">
+            
+            <label>Amount Paid (<?= ($form_action === 'edit') ? 'Locked' : 'Optional' ?>)</label>
+            <input type="number" step="0.01" name="amount_paid" id="amount_paid" value="<?= htmlspecialchars($form_data['amount_paid'] ?? '') ?>" placeholder="0.00" min="0" <?= ($form_action === 'edit') ? 'disabled' : '' ?>>
+            
+            <label>Mode of Payment (for initial payment)</label>
+            <select name="mode_of_payment" id="mode_of_payment" <?= ($form_action === 'edit') ? 'disabled' : '' ?>>
+                <option value="">-- Select --</option>
+                <option value="Cash" <?= (($form_data['mode_of_payment'] ?? '') === 'Cash') ? 'selected' : '' ?>>Cash</option>
+                <option value="Gcash" <?= (($form_data['mode_of_payment'] ?? '') === 'Gcash') ? 'selected' : '' ?>>Gcash</option>
+                <option value="Bank" <?= (($form_data['mode_of_payment'] ?? '') === 'Bank') ? 'selected' : '' ?>>Bank</option>
+                <option value="Other" <?= (($form_data['mode_of_payment'] ?? '') === 'Other') ? 'selected' : '' ?>>Other</option>
+            </select>
+            
+            <div class="actions">
+                <button type="button" class="btn" id="closeAdd">Cancel</button>
+                <button type="submit" class="btn primary">Save</button>
+            </div>
+        </form>
+    </div>
 </div>
 
 <div class="modal" id="modalPay">
-  <div class="modal-content">
-    <h2>Record Payment</h2>
-    <form method="post" id="formPay" action="receivables.php">
-      <input type="hidden" name="action" value="pay">
-       <input type="hidden" name="rec_id" id="pay_receivable_id">
-      <p style="text-align: center; margin-bottom: 15px;"><strong>Client:</strong> <span id="pay_client_name" style="font-weight: normal;"></span></p>
-      <p style="text-align: center; margin-bottom: 20px;"><strong>Current Balance:</strong> <span style="font-weight: bold; color: var(--danger);">₱<span id="pay_balance"></span></span></p>
-      <label>Amount to Pay</label>
-      <input type="number" step="0.01" name="paid_amount" id="paid_amount" required min="0.01">
-       <label>Mode of Payment</label>
-       <select name="payment_mode" id="payment_mode"> <option value="">-- Use Receivable Mode --</option>
-           <option value="Cash">Cash</option>
-           <option value="Gcash">Gcash</option>
-           <option value="Bank">Bank</option>
-           <option value="Other">Other</option>
-       </select>
-      <div class="actions">
-        <button type="button" class="btn" id="closePay">Cancel</button>
-        <button type="submit" class="btn primary">Confirm Payment</button>
-      </div>
-    </form>
-  </div>
+    <div class="modal-content">
+        <h2>Record Payment</h2>
+        <form method="post" id="formPay" action="receivables.php">
+            <input type="hidden" name="action" value="pay">
+            <input type="hidden" name="rec_id" id="pay_receivable_id">
+            <p style="text-align: center; margin-bottom: 15px;"><strong>Client:</strong> <span id="pay_client_name" style="font-weight: normal;"></span></p>
+            <p style="text-align: center; margin-bottom: 20px;"><strong>Current Balance:</strong> <span style="font-weight: bold; color: var(--danger);">₱<span id="pay_balance"></span></span></p>
+            <label>Amount to Pay</label>
+            <input type="number" step="0.01" name="paid_amount" id="paid_amount" required min="0.01">
+            <label>Mode of Payment</label>
+            <select name="payment_mode" id="payment_mode" required>
+                <option value="">-- Select Mode --</option>
+                <option value="Cash">Cash</option>
+                <option value="Gcash">Gcash</option>
+                <option value="Bank">Bank</option>
+                <option value="Other">Other</option>
+            </select>
+            <div class="actions">
+                <button type="button" class="btn" id="closePay">Cancel</button>
+                <button type="submit" class="btn primary">Confirm Payment</button>
+            </div>
+        </form>
+    </div>
 </div>
 
 <form method="POST" action="receivables.php" id="pdfForm" target="_blank" style="display: none;">
@@ -604,6 +738,12 @@ tr:hover{background:#fff6f9}
     <input type="hidden" name="pdf_data" id="pdfDataInput">
     <input type="hidden" name="pdf_filters" id="pdfFiltersInput">
 </form>
+
+<script>
+    const FPDF_MISSING = <?= defined('FPDF_MISSING') ? 'true' : 'false' ?>;
+    // MODIFIED: Pass form_action to JS to prevent JS from overriding repopulated modal
+    const PHP_FORM_ACTION = '<?= $form_action ?? '' ?>';
+</script>
 
 <script>
 /* DOM helpers & initial state - Same */
@@ -621,6 +761,7 @@ let rowsPerPage = parseInt(rowsPerPageInput.value) || 8;
 let currentPage = 1;
 let currentSortKey = 'created_at';
 let currentSortAsc = false;
+let originalEditData = null; // <-- For edit check
 
 /* Add / Edit modal wiring */
 const modalAdd = document.getElementById('modalAdd');
@@ -629,48 +770,65 @@ const openAddBtn = document.getElementById('openAddBtn');
 const closeAdd = document.getElementById('closeAdd');
 const addTitle = document.getElementById('addTitle');
 
-openAddBtn.onclick = () => { /* Same */
-  formAdd.reset(); document.getElementById('formAddAction').value = 'add';
-  document.getElementById('formAddId').value = ''; document.getElementById('amount_paid').disabled = false;
-  addTitle.textContent = 'New Receivable'; modalAdd.classList.add('active');
+openAddBtn.onclick = () => {
+    formAdd.reset(); 
+    document.getElementById('formAddAction').value = 'add';
+    document.getElementById('formAddId').value = ''; 
+    document.getElementById('amount_paid').disabled = false;
+    document.getElementById('mode_of_payment').disabled = false;
+    addTitle.textContent = 'New Receivable'; 
+    originalEditData = null; // Clear original data
+    modalAdd.classList.add('active');
 };
 closeAdd.onclick = () => modalAdd.classList.remove('active');
 
 document.querySelectorAll('.editBtn').forEach(btn=>{
-  btn.onclick = (e)=>{
-    const tr = btn.closest('tr'); const data = JSON.parse(tr.dataset.row); formAdd.reset();
-    document.getElementById('formAddAction').value = 'edit';
-    // Use rec_id from data
-    document.getElementById('formAddId').value = data.rec_id; // *** CHANGED data.id to data.rec_id ***
-    document.getElementById('client_name').value = data.client_name;
-    document.getElementById('affiliation').value = data.affiliation || '';
-    document.getElementById('amount').value = parseFloat(data.amount || 0).toFixed(2);
-    document.getElementById('amount_paid').value = parseFloat(data.total_paid || 0).toFixed(2);
-    document.getElementById('amount_paid').disabled = true;
-    document.getElementById('mode_of_payment').value = data.mode_of_payment || '';
-    addTitle.textContent = 'Edit Receivable'; modalAdd.classList.add('active');
-  }
+    btn.onclick = (e)=>{
+        // MODIFIED: Do not run if PHP is already showing the modal from an error
+        if (PHP_FORM_ACTION === 'edit') return;
+        
+        const tr = btn.closest('tr'); const data = JSON.parse(tr.dataset.row); formAdd.reset();
+        document.getElementById('formAddAction').value = 'edit';
+        document.getElementById('formAddId').value = data.rec_id;
+        document.getElementById('client_name').value = data.client_name;
+        document.getElementById('affiliation').value = data.affiliation || '';
+        document.getElementById('amount').value = parseFloat(data.amount || 0).toFixed(2);
+        document.getElementById('amount_paid').value = parseFloat(data.total_paid || 0).toFixed(2);
+        document.getElementById('amount_paid').disabled = true;
+        document.getElementById('mode_of_payment').disabled = true;
+        addTitle.textContent = 'Edit Receivable'; 
+        
+        // Store original data
+        originalEditData = {
+            client_name: data.client_name,
+            affiliation: data.affiliation || '',
+            amount: parseFloat(data.amount || 0).toFixed(2)
+        };
+
+        modalAdd.classList.add('active');
+    }
 });
+
 
 /* Delete - SweetAlert */
 document.querySelectorAll('.deleteBtn').forEach(btn=>{
-  btn.onclick = ()=>{
-    const data = JSON.parse(btn.closest('tr').dataset.row);
-    // Use rec_id from data
-    const rec_id = data.rec_id; // *** CHANGED data.id to data.rec_id ***
-    Swal.fire({
-        title: 'Are you sure?', text: `Delete receivable Ref# ${data.reference_number}?`,
-        icon: 'warning', showCancelButton: true, confirmButtonText: 'Yes, delete it!',
-        buttonsStyling: false, customClass: { confirmButton: 'btn primary', cancelButton: 'btn' }
-    }).then((result) => {
-        if (result.isConfirmed) {
-            const form = document.createElement('form'); form.method = 'POST'; form.action = 'receivables.php';
-            // Use rec_id in hidden input
-            form.innerHTML = `<input type="hidden" name="action" value="delete"><input type="hidden" name="rec_id" value="${rec_id}">`; // *** CHANGED name="id" to name="rec_id" ***
-            document.body.appendChild(form); form.submit();
-        }
-    });
-  }
+    btn.onclick = ()=>{
+        const data = JSON.parse(btn.closest('tr').dataset.row);
+        const rec_id = data.rec_id;
+        // MODIFIED: Clearer alert text
+        Swal.fire({
+            title: 'Are you sure?',
+            text: `This will permanently delete the receivable for '${data.client_name}' (Ref# ${data.reference_number}). This cannot be undone!`,
+            icon: 'warning', showCancelButton: true, confirmButtonText: 'Yes, delete it!',
+            buttonsStyling: false, customClass: { confirmButton: 'btn primary', cancelButton: 'btn' }
+        }).then((result) => {
+            if (result.isConfirmed) {
+                const form = document.createElement('form'); form.method = 'POST'; form.action = 'receivables.php';
+                form.innerHTML = `<input type="hidden" name="action" value="delete"><input type="hidden" name="rec_id" value="${rec_id}">`;
+                document.body.appendChild(form); form.submit();
+            }
+        });
+    }
 });
 
 /* Pay modal wiring */
@@ -679,49 +837,261 @@ const closePay = document.getElementById('closePay');
 const formPay = document.getElementById('formPay');
 
 document.querySelectorAll('.payBtn').forEach(btn=>{
-  btn.onclick = ()=>{
-    const data = JSON.parse(btn.closest('tr').dataset.row); formPay.reset();
-    // Use rec_id from data
-    document.getElementById('pay_receivable_id').value = data.rec_id; // *** CHANGED data.id to data.rec_id ***
-    document.getElementById('pay_client_name').textContent = data.client_name;
-    const balance = parseFloat(data.balance || 0);
-    document.getElementById('pay_balance').textContent = balance.toFixed(2);
-    const amountInput = document.getElementById('paid_amount');
-    amountInput.value = ''; amountInput.max = balance.toFixed(2);
-    amountInput.placeholder = `Enter amount up to ${balance.toFixed(2)}`;
-    modalPay.classList.add('active'); // Corrected
-  }
+    btn.onclick = ()=>{
+        // MODIFIED: Do not run if PHP is showing another modal
+        if (PHP_FORM_ACTION) return;
+        
+        const data = JSON.parse(btn.closest('tr').dataset.row); formPay.reset();
+        document.getElementById('pay_receivable_id').value = data.rec_id;
+        document.getElementById('pay_client_name').textContent = data.client_name;
+        const balance = parseFloat(data.balance || 0);
+        document.getElementById('pay_balance').textContent = balance.toFixed(2);
+        const amountInput = document.getElementById('paid_amount');
+        amountInput.value = '';
+        amountInput.placeholder = `Enter amount (Balance: ₱${balance.toFixed(2)})`;
+        modalPay.classList.add('active');
+    }
 });
 closePay.onclick = ()=> modalPay.classList.remove('active');
 
-/* --- Filter, Sort, Pagination, PDF Generation --- Same logic, PDF adjusted */
-function getFilteredRows() { const q = searchInput.value.toLowerCase().trim(); return allRows.filter(r => { const tc = r.textContent.toLowerCase(); const ms = !q || tc.includes(q); if (!ms) return false; if (showingPending) { const d = JSON.parse(r.dataset.row); const b = parseFloat(d.balance || 0); return b > 0.009; } return true; }); }
-function sortRows(rowsToSort, key, asc) { rowsToSort.sort((a, b) => { const A_d = JSON.parse(a.dataset.row); const B_d = JSON.parse(b.dataset.row); let A = A_d[key]; let B = B_d[key]; if (['amount', 'total_paid', 'balance', 'is_paid'].includes(key)) { const nA = parseFloat(A) || 0; const nB = parseFloat(B) || 0; return asc ? (nA - nB) : (nB - nA); } if (key === 'date_created_only') { A = A_d['created_at'] || 0; B = B_d['created_at'] || 0; const dA = new Date(A); const dB = new Date(B); return asc ? dA - dB : dB - dA; } const sa = (A || '').toString().toLowerCase(); const sb = (B || '').toString().toLowerCase(); return asc ? sa.localeCompare(sb) : sb.localeCompare(sa); }); }
-function renderTable() { const fr = getFilteredRows(); sortRows(fr, currentSortKey, currentSortAsc); const tb = document.querySelector('#receivablesTable tbody'); tb.innerHTML = ''; const st = (currentPage - 1) * rowsPerPage; const en = st + rowsPerPage; const pr = fr.slice(st, en); pr.forEach(r => tb.appendChild(r)); renderPagination(fr.length); }
-function renderPagination(total) { const c = document.getElementById('pagination'); c.innerHTML = ''; const tp = Math.max(1, Math.ceil(total / rowsPerPage)); if (tp <= 1) return; for (let i = 1; i <= tp; i++) { const b = document.createElement('button'); b.textContent = i; if (i === currentPage) b.classList.add('active'); b.onclick = () => { currentPage = i; renderTable(); }; c.appendChild(b); } }
+/* --- Filter, Sort, Pagination --- (No change) */
+function getFilteredRows() {
+    const q = searchInput.value.toLowerCase().trim();
+    return allRows.filter(r => {
+        const tc = r.textContent.toLowerCase();
+        const matchesSearch = !q || tc.includes(q);
+        if (!matchesSearch) return false;
+        if (showingPending) {
+            try {
+                const d = JSON.parse(r.dataset.row || '{}');
+                const b = parseFloat(d.balance || 0);
+                return b > 0.009;
+            } catch(e) { return false; }
+        }
+        return true;
+    });
+}
+function sortRows(rowsToSort, key, asc) {
+    rowsToSort.sort((a, b) => {
+        let A_d, B_d;
+        try { A_d = JSON.parse(a.dataset.row || '{}'); B_d = JSON.parse(b.dataset.row || '{}'); }
+        catch(e) { return 0; }
+        let A = A_d[key]; let B = B_d[key];
+        if (['amount', 'total_paid', 'balance', 'is_paid'].includes(key)) {
+            const nA = parseFloat(A) || 0; const nB = parseFloat(B) || 0;
+            return asc ? (nA - nB) : (nB - nA);
+        }
+        if (key === 'date_created_only') {
+            A = A_d['created_at'] || 0; B = B_d['created_at'] || 0;
+            const dA = A ? new Date(A) : null; const dB = B ? new Date(B) : null;
+            if (dA === null && dB === null) return 0; if (dA === null) return asc ? 1 : -1; if (dB === null) return asc ? -1 : 1;
+            if (isNaN(dA.getTime()) && isNaN(dB.getTime())) return 0; if (isNaN(dA.getTime())) return asc ? 1 : -1; if (isNaN(dB.getTime())) return asc ? -1 : 1;
+            return asc ? dA - dB : dB - dA;
+        }
+        // Added sort for person_in_charge
+        if (key === 'person_in_charge') {
+            const sa = (A || '').toString().toLowerCase(); const sb = (B || '').toString().toLowerCase();
+            return asc ? sa.localeCompare(sb) : sb.localeCompare(sa);
+        }
+        const sa = (A || '').toString().toLowerCase(); const sb = (B || '').toString().toLowerCase();
+        return asc ? sa.localeCompare(sb) : sb.localeCompare(sa);
+    });
+}
+function renderTable() {
+    const fr = getFilteredRows(); sortRows(fr, currentSortKey, currentSortAsc);
+    const tb = document.querySelector('#receivablesTable tbody'); tb.innerHTML = '';
+    const st = (currentPage - 1) * rowsPerPage; const en = st + rowsPerPage;
+    const pr = fr.slice(st, en); const fragment = document.createDocumentFragment();
+    pr.forEach(r => fragment.appendChild(r)); tb.appendChild(fragment);
+    renderPagination(fr.length);
+}
+function renderPagination(total) {
+    const c = document.getElementById('pagination'); c.innerHTML = '';
+    const tp = Math.max(1, Math.ceil(total / rowsPerPage)); if (tp <= 1) return;
+    for (let i = 1; i <= tp; i++) {
+        const b = document.createElement('button'); b.textContent = i;
+        if (i === currentPage) b.classList.add('active');
+        b.onclick = () => { currentPage = i; renderTable(); }; c.appendChild(b);
+    }
+}
 
-/* --- Event Listeners --- Same */
+/* --- Event Listeners --- (No change) */
 searchInput.addEventListener('input', () => { currentPage = 1; renderTable(); });
 showPendingBtn.onclick = () => { showingPending = !showingPending; showPendingBtn.innerHTML = showingPending ? '<i class="fa fa-list"></i> Show All' : '<i class="fa fa-clock"></i> Pending Only'; showPendingBtn.classList.toggle('pending', showingPending); currentPage = 1; renderTable(); };
 rowsPerPageInput.addEventListener('change', () => { let nr = parseInt(rowsPerPageInput.value); if (nr > 0) { rowsPerPage = nr; } else { rowsPerPageInput.value = rowsPerPage; } currentPage = 1; renderTable(); });
-document.querySelectorAll('th[data-key]').forEach(th => { th.addEventListener('click', () => { const k = th.dataset.key; if (currentSortKey === k) { currentSortAsc = !currentSortAsc; } else { currentSortKey = k; currentSortAsc = true; } document.querySelectorAll('.sort-icon').forEach(i => i.className = 'fa fa-sort sort-icon'); th.querySelector('.sort-icon').className = currentSortAsc ? 'fa fa-sort-up sort-icon' : 'fa fa-sort-down sort-icon'; currentPage = 1; renderTable(); }); });
+document.querySelectorAll('th[data-key]').forEach(th => {
+    th.addEventListener('click', () => {
+        const k = th.dataset.key; if (currentSortKey === k) { currentSortAsc = !currentSortAsc; } else { currentSortKey = k; currentSortAsc = true; }
+        document.querySelectorAll('#receivablesTable .sort-icon').forEach(i => i.className = 'fa fa-sort sort-icon');
+        const currentIcon = th.querySelector('.sort-icon'); if(currentIcon){ currentIcon.className = currentSortAsc ? 'fa fa-sort-up sort-icon' : 'fa fa-sort-down sort-icon'; }
+        currentPage = 1; renderTable();
+    });
+});
 
-/* PDF Generation Button Listener - Adjusted data mapping */
+/* PDF Generation Button Listener - ADDED incharge */
 generatePdfBtn.addEventListener('click', () => {
+    if (typeof FPDF_MISSING !== 'undefined' && FPDF_MISSING) {
+        Swal.fire({
+            icon: 'error',
+            title: 'PDF Generation Error',
+            text: 'The PDF library (FPDF) is missing on the server. Please contact an administrator to fix the installation.',
+            buttonsStyling: false,
+            customClass: { confirmButton: 'btn primary' }
+        });
+        return; // Stop the PDF generation
+    }
+
     const filteredRows = getFilteredRows(); sortRows(filteredRows, currentSortKey, currentSortAsc);
-    const dataForPdf = filteredRows.map(row => { const rowData = JSON.parse(row.dataset.row); const cells = row.getElementsByTagName('td');
-        // Indices match HTML table (without Origin Ref)
-        return { date: cells[0]?.textContent||'', client: cells[1]?.textContent||'', affiliation: cells[2]?.textContent||'', ref: cells[3]?.textContent||'', amount_display: cells[4]?.textContent||'₱ 0.00', paid_display: cells[5]?.textContent||'₱ 0.00', balance_display: cells[6]?.textContent||'₱ 0.00', mode: cells[7]?.textContent||'', status: cells[8]?.textContent||'', amount: parseFloat(rowData.amount||0), paid: parseFloat(rowData.total_paid||0), balance: parseFloat(rowData.balance||0) }; });
+    const dataForPdf = filteredRows.map(row => {
+        const rowData = JSON.parse(row.dataset.row || '{}'); const cells = row.getElementsByTagName('td');
+        return {
+            date: cells[0]?.textContent||'', client: cells[1]?.textContent||'', affiliation: cells[2]?.textContent||'',
+            ref: cells[3]?.textContent||'', amount_display: cells[4]?.textContent||'₱ 0.00',
+            paid_display: cells[5]?.textContent||'₱ 0.00', balance_display: cells[6]?.textContent||'₱ 0.00',
+            incharge: cells[7]?.textContent||'', // Added
+            status: cells[8]?.textContent||'', // Now index 8
+            amount: parseFloat(rowData.amount||0), paid: parseFloat(rowData.total_paid||0), balance: parseFloat(rowData.balance||0)
+        };
+    });
     const filtersForPdf = { search: searchInput.value, pending: showingPending, sortKey: currentSortKey, sortAsc: currentSortAsc };
     pdfDataInput.value = JSON.stringify(dataForPdf); pdfFiltersInput.value = JSON.stringify(filtersForPdf); pdfForm.submit();
 });
 
-/* --- Form Validation & Modal Close --- Same */
-renderTable();
-formAdd.addEventListener('submit', function(e){ const c = document.getElementById('client_name').value.trim(); const a = parseFloat(document.getElementById('amount').value); const ap = parseFloat(document.getElementById('amount_paid').value || 0); const m = document.getElementById('mode_of_payment').value; let err = ''; if (!c) { err = 'Client name required.'; } else if (isNaN(a) || a <= 0) { err = 'Amount > 0 required.'; } else if (isNaN(ap) || ap < 0) { err = 'Initial paid cannot be negative.'; } else if (ap > a + 0.009) { err = 'Initial paid > amount.'; } else if (ap > 0.009 && !m) { err = 'Mode of Payment required for initial payment.';} if (err) { e.preventDefault(); Swal.fire({ icon: 'error', title: 'Validation Error', text: err, buttonsStyling: false, customClass: { confirmButton: 'btn primary' } }); return false; } });
-formPay.addEventListener('submit', function(e){ const amt = parseFloat(document.getElementById('paid_amount').value); const bal = parseFloat(document.getElementById('pay_balance').textContent); let err = ''; if (isNaN(amt) || amt <= 0) { err = 'Enter valid payment > 0.'; } else if (amt > bal + 0.009) { err = `Payment (₱${amt.toFixed(2)}) > balance (₱${bal.toFixed(2)}).`; } if (err) { e.preventDefault(); Swal.fire({ icon: 'error', title: 'Validation Error', text: err, buttonsStyling: false, customClass: { confirmButton: 'btn primary' } }); return false; } });
+
+/* --- Form Validation & Modal Close --- */
+document.addEventListener('DOMContentLoaded', renderTable);
+
+// --- THIS IS THE NEW SUBMIT HANDLER ---
+formAdd.addEventListener('submit', function(e){
+    // --- 1. Get values for validation ---
+    const clientNameInput = document.getElementById('client_name');
+    const amountInput = document.getElementById('amount');
+    const amountPaidInput = document.getElementById('amount_paid');
+    const modeInput = document.getElementById('mode_of_payment');
+    const action = document.getElementById('formAddAction').value;
+    
+    const clientName = clientNameInput.value.trim();
+    const amount = parseFloat(amountInput.value);
+    const amountPaid = parseFloat(amountPaidInput.value || 0);
+    const mode = modeInput.value;
+    
+    let errorMessage = '';
+
+    // --- 2. Run Basic Validation ---
+    if (!clientName) { errorMessage = 'Please enter a client name.'; }
+    else if (isNaN(amount) || amount <= 0) { errorMessage = 'Please enter a valid amount greater than 0.'; }
+    
+    // Only validate payment fields if not in edit mode
+    if (action === 'add') {
+        if (isNaN(amountPaid) || amountPaid < 0) { errorMessage = 'Initial paid amount cannot be negative. Please enter 0 or more.'; }
+        else if (amountPaid > amount + 0.009) { errorMessage = 'Initial paid amount cannot be more than the total amount.'; }
+        else if (amountPaid > 0.009 && !mode) { errorMessage = "Please select a 'Mode of Payment' if you are adding an initial payment.";}
+    }
+
+    if (errorMessage) {
+        e.preventDefault(); // Stop submission due to validation error
+        Swal.fire({ icon: 'error', title: 'Oops... Please check the form', text: errorMessage, buttonsStyling: false, customClass: { confirmButton: 'btn primary' } });
+        return false;
+    }
+
+    // --- 3. If validation passed, check for Edit/Add ---
+    
+    // If it's an 'add' action, validation passed, so let the form submit normally.
+    if (action === 'add') {
+        return; // Don't prevent default, allow submission
+    }
+
+    // --- 4. If it's an 'edit' action, prevent default and run custom logic ---
+    e.preventDefault(); 
+    
+    if (action === 'edit' && originalEditData) {
+        // Get current values
+        const currentClientName = clientNameInput.value.trim();
+        const currentAffiliation = document.getElementById('affiliation').value.trim();
+        const currentAmount = parseFloat(amountInput.value).toFixed(2);
+
+        // Compare with original data (case-insensitive for names)
+        const hasChanged = (
+            currentClientName.toUpperCase() !== originalEditData.client_name.toUpperCase() ||
+            currentAffiliation !== originalEditData.affiliation ||
+            currentAmount !== originalEditData.amount
+        );
+
+        if (!hasChanged) {
+            // No changes: Show message and stay
+            Swal.fire({
+                icon: 'info',
+                title: 'No Changes Detected',
+                text: 'You have not made any changes to the record.',
+                buttonsStyling: false,
+                customClass: { confirmButton: 'btn primary' }
+            });
+            // Do not submit
+        } else {
+            // Changes detected: Ask for confirmation
+            Swal.fire({
+                title: 'Confirm Update',
+                text: 'Are you sure you want to save these changes?',
+                icon: 'question',
+                showCancelButton: true,
+                confirmButtonText: 'Yes, update it!',
+                cancelButtonText: 'Cancel',
+                buttonsStyling: false,
+                customClass: { confirmButton: 'btn primary', cancelButton: 'btn' }
+            }).then((result) => {
+                if (result.isConfirmed) {
+                    // User confirmed: Manually submit the form
+                    formAdd.submit();
+                }
+                // If cancelled, do nothing. Modal stays open.
+            });
+        }
+    } else if (action === 'edit' && !originalEditData) {
+        // This shouldn't happen, but as a fallback...
+        console.error("Edit action submitted, but originalEditData is missing.");
+        formAdd.submit(); // Submit anyway
+    }
+});
+// --- END OF NEW SUBMIT HANDLER ---
+
+
+formPay.addEventListener('submit', function(e){
+    const amountToPay = parseFloat(document.getElementById('paid_amount').value);
+    const paymentMode = document.getElementById('payment_mode').value;
+    let errorMessage = '';
+
+    if (isNaN(amountToPay) || amountToPay <= 0) { errorMessage = 'Please enter a valid payment amount greater than 0.'; }
+    else if (!paymentMode) { errorMessage = 'Please select a Mode of Payment.'; }
+
+    if (errorMessage) {
+        e.preventDefault();
+        Swal.fire({ icon: 'error', title: 'Oops... Payment Error', text: errorMessage, buttonsStyling: false, customClass: { confirmButton: 'btn primary' } });
+        return false;
+    }
+});
+
 document.querySelectorAll('.modal').forEach(m=>{ m.addEventListener('click', (ev)=>{ if (ev.target === m) m.classList.remove('active'); }); });
-document.addEventListener('DOMContentLoaded', () => { <?php if ($success_message): ?> Swal.fire({ icon: 'success', title: 'Success', text: '<?= addslashes($success_message) ?>', timer: 2500, showConfirmButton: false }); <?php elseif ($error_message): ?> Swal.fire({ icon: 'error', title: 'Error', text: '<?= addslashes($error_message) ?>', confirmButtonText: 'OK', buttonsStyling: false, customClass: { confirmButton: 'btn primary' } }); <?php elseif ($warning_message): ?> Swal.fire({ icon: 'warning', title: 'Warning', text: '<?= addslashes($warning_message) ?>', confirmButtonText: 'OK', buttonsStyling: false, customClass: { confirmButton: 'btn primary' } }); <?php endif; ?> });
+
+document.addEventListener('DOMContentLoaded', () => {
+    // This will now show all errors, warnings, and successes from PHP
+    <?php if ($success_message): ?> 
+        Swal.fire({ icon: 'success', title: 'Success!', text: '<?= addslashes($success_message) ?>', timer: 2500, showConfirmButton: false }); 
+    <?php endif; ?>
+    <?php if ($error_message): ?> 
+        Swal.fire({ icon: 'error', title: 'An Error Occurred', text: '<?= addslashes($error_message) ?>', confirmButtonText: 'OK', buttonsStyling: false, customClass: { confirmButton: 'btn primary' } }); 
+    <?php endif; ?>
+    <?php if ($warning_message): ?> 
+        Swal.fire({ icon: 'warning', title: 'Please Note', text: '<?= addslashes($warning_message) ?>', confirmButtonText: 'OK', buttonsStyling: false, customClass: { confirmButton: 'btn primary' } }); 
+    <?php endif; ?>
+    
+    // MODIFIED: If PHP opened a modal, disable JS click handlers that would open a *different* one
+    if (PHP_FORM_ACTION) {
+        if (PHP_FORM_ACTION === 'add' || PHP_FORM_ACTION === 'edit') {
+            // Disable pay buttons
+            document.querySelectorAll('.payBtn').forEach(btn => btn.disabled = true);
+        }
+    }
+});
 </script>
 </body>
 </html>

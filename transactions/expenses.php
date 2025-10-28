@@ -1,6 +1,12 @@
 <?php
 // transactions/expenses.php
 session_start();
+
+// Prevent browser caching
+header("Cache-Control: no-store, no-cache, must-revalidate, max-age=0");
+header("Pragma: no-cache");
+header("Expires: 0"); // Expire immediately
+
 require_once '../db.php';
 
 // --- Include FPDF ---
@@ -17,16 +23,11 @@ if (!isset($_SESSION['user_id'])) { // Check user_id
     exit();
 }
 
-// ===================================
-// START: ADDED/MODIFIED PHP VARIABLES
-// ===================================
 $user_id = $_SESSION['user_id'];
-// Use name from session, fallback to username
-$current_display_name = $_SESSION['name'] ?? $_SESSION['username'] ?? 'User';
+// MODIFIED: Ensure display name is uppercase
+$current_display_name = strtoupper($_SESSION['name'] ?? $_SESSION['username'] ?? 'User');
 $role = $_SESSION['role'] ?? 'user';
-// ===================================
-// END: ADDED/MODIFIED PHP VARIABLES
-// ===================================
+$is_admin = ($_SESSION['role'] === 'admin');
 
 // --- Enhanced FPDF Class (Keep as before) ---
 class PDF extends FPDF {
@@ -34,6 +35,7 @@ class PDF extends FPDF {
     private $colorAccent = [216, 76, 115]; private $colorLightPink = [255, 240, 246]; private $colorMuted = [107, 74, 87]; private $colorDark = [61, 26, 42]; private $colorBorder = [243, 208, 220];
 
     function setReportHeader($title, $period, $user) {
+        // MODIFIED: $user is already uppercase
         if (function_exists('iconv')) {
             $this->reportTitle = @iconv('UTF-8', 'cp1252//IGNORE', $title) ?: $title;
             $this->periodLabel = @iconv('UTF-8', 'cp1252//IGNORE', $period) ?: $period;
@@ -47,9 +49,11 @@ class PDF extends FPDF {
             $this->SetFillColor($fill ? 245 : 255);
             for ($i = 0; $i < count($header); $i++) {
                 $cellValue = $row[$i] ?? ''; $originalValue = $cellValue;
+                // MODIFIED: Names (idx 4) are already uppercase from JS
                 if (function_exists('iconv') && mb_detect_encoding((string)$cellValue, 'UTF-8', true) && preg_match('/[^\x00-\x7F]/', (string)$cellValue)) { $convertedValue = @iconv('UTF-8', 'cp1252//IGNORE', (string)$cellValue); if ($convertedValue !== false) { $cellValue = $convertedValue; } }
                 $cleanOriginalValue = preg_replace('/[^0-9.]/', '', (string)$originalValue);
-                $align = 'L'; if (strpos((string)$originalValue, '₱') !== false) { $align = 'R'; }
+                // MODIFIED: Align right if numeric OR starts with ₱
+                $align = (is_numeric($cleanOriginalValue) || strpos(trim((string)$originalValue), '₱') === 0) ? 'R' : 'L';
                 $this->Cell($widths[$i], 6, (string)$cellValue, 'LR', 0, $align, true);
             }
             $this->Ln(); $fill = !$fill;
@@ -60,6 +64,19 @@ class PDF extends FPDF {
 }
 // --- END FPDF Class ---
 
+// --- NEW: Function to redirect with error and form data ---
+function redirectWithError($message, $modal_id = null) {
+    $_SESSION['error_message'] = $message;
+    // Save POST data to session to repopulate form
+    $_SESSION['form_data'] = $_POST;
+    if ($modal_id) {
+        // Tell the page to reopen this specific modal
+        $_SESSION['open_modal'] = $modal_id;
+    }
+    header("Location: expenses.php");
+    exit();
+}
+
 
 // --- Handle POST actions ---
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -68,12 +85,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     // --- PDF Generation Action ---
     if ($action === 'generate_current_view_pdf') {
-        if (defined('FPDF_MISSING') || !file_exists($fpdf_path)) { die("FPDF library not found."); }
+        if (defined('FPDF_MISSING') || !file_exists($fpdf_path)) {
+            // User-friendly fallback. JS will catch this first.
+            echo "Error: The PDF generation library (FPDF) is missing. Please contact an administrator.";
+            exit();
+        }
 
         $jsonData = $_POST['pdf_data'] ?? '[]';
         $data = json_decode($jsonData, true);
         $filters = json_decode($_POST['pdf_filters'] ?? '{}', true);
-        if (json_last_error() !== JSON_ERROR_NONE) { die("Error decoding PDF data: ".json_last_error_msg()); }
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            // User-friendly fallback
+            echo "Error: Could not read the data to generate the PDF. The data from the page was corrupted.";
+            exit();
+        }
 
         $pdf = new PDF('P', 'mm', 'A4'); $pdf->AliasNbPages();
 
@@ -85,13 +110,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $sortKeyLabel = str_replace(['_','only'], [' ',''], $filters['sortKey'] ?? 'Default');
         $periodLabel .= " | Sorted By: " . ucwords($sortKeyLabel) . " " . ($filters['sortAsc'] ? '(Asc)' : '(Desc)');
 
-        $pdf->setReportHeader($reportTitle, $periodLabel, $current_display_name); // Use display name
+        // MODIFIED: $current_display_name is already uppercase
+        $pdf->setReportHeader($reportTitle, $periodLabel, $current_display_name);
         $pdf->AddPage(); $pdf->SetFont('Arial', '', 8);
 
         if (!empty($data)) {
             $header = ['Date', 'Expense', 'Store/Merchant', 'Amount', 'In-Charge'];
             $table_data = []; $total_amount = 0;
             foreach ($data as $row) {
+                // MODIFIED: Data from JS textContent is already uppercase
                 $rowData = [ $row['date'] ?? '', $row['expense'] ?? '', $row['store'] ?? '', $row['amount_display'] ?? '₱ 0.00', $row['incharge'] ?? '' ];
                 $table_data[] = $rowData; $total_amount += $row['amount'] ?? 0;
             }
@@ -107,75 +134,162 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     // --- End PDF ---
 
     elseif ($action === 'add') {
-        // Person in charge is now automatically the logged-in user
-        if (!required('expense') || !isset($_POST['amount'])) { // Amount can be 0 initially
-             $_SESSION['error_message'] = "Expense name and amount are required."; header("Location: expenses.php"); exit();
+        // Store/Merchant is optional, so it's not checked here
+        if (!required('expense') || !isset($_POST['amount'])) {
+            // User-friendly error with data retention
+            redirectWithError("Please fill in all required fields: Expense Name and Amount.", '#modalAdd');
         }
         $expense = trim($_POST['expense']);
         $amount = floatval($_POST['amount']);
         $store_or_merchant = trim($_POST['store_or_merchant'] ?? '');
-        $person_in_charge = $current_display_name; // Use display name
+        $person_in_charge = $current_display_name; // Already uppercase
         $transaction_dt = date('Y-m-d H:i:s');
 
-        if ($amount <= 0) { $_SESSION['error_message'] = "Amount must be > 0."; header("Location: expenses.php"); exit(); }
+        if ($amount <= 0) {
+            // User-friendly error with data retention
+            redirectWithError("The 'Amount' must be a positive number (greater than 0).", '#modalAdd');
+        }
 
         $stmt = $conn->prepare("INSERT INTO expenses (expense, amount, store_or_merchant, person_in_charge, created_at, transaction_datetime) VALUES (?, ?, ?, ?, ?, ?)");
         if ($stmt) {
-             $stmt->bind_param("sdssss", $expense, $amount, $store_or_merchant, $person_in_charge, $transaction_dt, $transaction_dt);
-             if ($stmt->execute()) { $_SESSION['success_message'] = "Expense added."; }
-             else { $_SESSION['error_message'] = "Error adding: " . $stmt->error; }
-             $stmt->close();
-        } else { $_SESSION['error_message'] = "DB error: " . $conn->error; }
-        header("Location: expenses.php"); exit();
+            $stmt->bind_param("sdssss", $expense, $amount, $store_or_merchant, $person_in_charge, $transaction_dt, $transaction_dt);
+            if ($stmt->execute()) {
+                $_SESSION['success_message'] = "Expense added successfully.";
+
+                // --- ADD LOGGING ---
+                try {
+                    $new_expense_id = $conn->insert_id;
+                    $log_user_id = $_SESSION['user_id'] ?? 0;
+                    $log_username = $person_in_charge; // Already uppercase
+                    $log_details = "User '{$log_username}' created Expense '{$expense}'. Amount: ₱" . number_format($amount, 2) . (!empty($store_or_merchant) ? " at '{$store_or_merchant}'" : "");
+                    $log_stmt = $conn->prepare("INSERT INTO transaction_logs (user_id, username, action_type, entity_type, entity_id, details, log_timestamp) VALUES (?, ?, 'CREATE', 'Expense', ?, ?, ?)");
+                    if ($log_stmt) {
+                        $log_stmt->bind_param("isiss", $log_user_id, $log_username, $new_expense_id, $log_details, $transaction_dt);
+                        $log_stmt->execute();
+                        $log_stmt->close();
+                    }
+                } catch (Exception $log_e) { /* Optional: Log error to file */ }
+                // --- END LOGGING ---
+
+            } else {
+                // User-friendly error with data retention
+                redirectWithError("A database error occurred while saving. Please try again or contact support.", '#modalAdd');
+            }
+            $stmt->close();
+        } else {
+            // User-friendly error with data retention
+            redirectWithError("A database error occurred. Could not prepare to save the expense.", '#modalAdd');
+        }
     }
     elseif ($action === 'edit') {
-        // Use expe_id
-        $expe_id = intval($_POST['expe_id'] ?? 0); // Changed from 'id'
-        // Person in charge might be editable or updated automatically
-        $person_in_charge_from_form = trim($_POST['person_in_charge'] ?? ''); // Get from form if provided
+        $expe_id = intval($_POST['expe_id'] ?? 0);
 
+        // Store/Merchant is optional
         if ($expe_id <= 0 || !required('expense') || !isset($_POST['amount'])) {
-             $_SESSION['error_message'] = "Missing required fields."; header("Location: expenses.php"); exit();
+            // User-friendly error with data retention
+            redirectWithError("Missing required fields. Please fill in all fields to edit the expense.", '#modalAdd');
         }
         $expense = trim($_POST['expense']);
         $amount = floatval($_POST['amount']);
         $store_or_merchant = trim($_POST['store_or_merchant'] ?? '');
-        // Decide how to handle person_in_charge on edit: keep original (from form) or update to current user
-        // Option 1: Keep original if provided, else update to current user
-        $person_in_charge = !empty($person_in_charge_from_form) ? $person_in_charge_from_form : $current_display_name;
-        // Option 2: Always update to current user
-        // $person_in_charge = $current_display_name;
+        $person_in_charge = $current_display_name; // User doing the edit (already uppercase)
 
-        if ($amount <= 0) { $_SESSION['error_message'] = "Amount must be > 0."; header("Location: expenses.php"); exit(); }
+        if ($amount <= 0) {
+            // User-friendly error with data retention
+            redirectWithError("The 'Amount' must be a positive number (greater than 0).", '#modalAdd');
+        }
 
-        // Use expe_id in WHERE
         $stmt = $conn->prepare("UPDATE expenses SET expense = ?, amount = ?, store_or_merchant = ?, person_in_charge = ?, transaction_datetime = NOW() WHERE expe_id = ?");
         if ($stmt) {
-             $stmt->bind_param("sdssi", $expense, $amount, $store_or_merchant, $person_in_charge, $expe_id); // Use expe_id
-             if ($stmt->execute()) { $_SESSION['success_message'] = "Expense updated."; }
-             else { $_SESSION['error_message'] = "Error updating: " . $stmt->error; }
-             $stmt->close();
-        } else { $_SESSION['error_message'] = "DB error: " . $conn->error; }
-        header("Location: expenses.php"); exit();
+            $stmt->bind_param("sdssi", $expense, $amount, $store_or_merchant, $person_in_charge, $expe_id);
+            if ($stmt->execute()) {
+                $_SESSION['success_message'] = "Expense updated successfully.";
+
+                // --- ADD LOGGING ---
+                try {
+                    $log_user_id = $_SESSION['user_id'] ?? 0;
+                    $log_username = $person_in_charge; // Already uppercase
+                    $log_details = "User '{$log_username}' edited Expense ID {$expe_id}. New details: '{$expense}', Amount: ₱" . number_format($amount, 2);
+                    $log_stmt = $conn->prepare("INSERT INTO transaction_logs (user_id, username, action_type, entity_type, entity_id, details) VALUES (?, ?, 'UPDATE', 'Expense', ?, ?)");
+                    if ($log_stmt) {
+                        $log_stmt->bind_param("isis", $log_user_id, $log_username, $expe_id, $log_details);
+                        $log_stmt->execute();
+                        $log_stmt->close();
+                    }
+                } catch (Exception $log_e) { /* Optional: Log error to file */ }
+                // --- END LOGGING ---
+
+            } else {
+                // User-friendly error with data retention
+                redirectWithError("A database error occurred while updating. The changes were not saved.", '#modalAdd');
+            }
+            $stmt->close();
+        } else {
+            // User-friendly error with data retention
+            redirectWithError("A database error occurred. Could not prepare the update.", '#modalAdd');
+        }
     }
     elseif ($action === 'delete') {
-        // Use expe_id
-        $expe_id = intval($_POST['expe_id'] ?? 0); // Changed from 'id'
+        $expe_id = intval($_POST['expe_id'] ?? 0);
         if ($expe_id > 0) {
-            // Use expe_id in WHERE
+
+            // --- ADD LOGGING (Must happen before delete) ---
+            try {
+                $expense_log = 'ID ' . $expe_id;
+                $amount_log = 0;
+                $stmt_get = $conn->prepare("SELECT expense, amount FROM expenses WHERE expe_id = ?");
+                if($stmt_get){
+                    $stmt_get->bind_param("i", $expe_id);
+                    if($stmt_get->execute()) {
+                        $stmt_get->bind_result($expense_log, $amount_log);
+                        $stmt_get->fetch();
+                    }
+                    $stmt_get->close();
+                }
+
+                $log_user_id = $_SESSION['user_id'] ?? 0;
+                $log_username = $current_display_name; // Already uppercase
+                $log_details = "User '{$log_username}' DELETED Expense '{$expense_log}' (Amount: ₱" . number_format($amount_log, 2) . ").";
+                $log_stmt = $conn->prepare("INSERT INTO transaction_logs (user_id, username, action_type, entity_type, entity_id, details) VALUES (?, ?, 'DELETE', 'Expense', ?, ?)");
+                if ($log_stmt) {
+                    $log_stmt->bind_param("isis", $log_user_id, $log_username, $expe_id, $log_details);
+                    $log_stmt->execute();
+                    $log_stmt->close();
+                }
+            } catch (Exception $log_e) { /* Optional: Log error to file */ }
+            // --- END LOGGING ---
+
             $stmt = $conn->prepare("DELETE FROM expenses WHERE expe_id = ?");
-             if ($stmt) {
-                 $stmt->bind_param("i", $expe_id); // Use expe_id
-                 if ($stmt->execute()) { $_SESSION['success_message'] = "Expense deleted."; }
-                 else { $_SESSION['error_message'] = "Error deleting: " . $stmt->error; }
-                 $stmt->close();
-             } else { $_SESSION['error_message'] = "DB error: " . $conn->error; }
-        } else { $_SESSION['error_message'] = "Invalid ID."; }
-        header("Location: expenses.php"); exit();
+            if ($stmt) {
+                $stmt->bind_param("i", $expe_id);
+                if ($stmt->execute()) {
+                    $_SESSION['success_message'] = "Expense deleted successfully.";
+                } else {
+                    // User-friendly error
+                    $_SESSION['error_message'] = "Could not delete the item. It might be in use or protected by the database.";
+                }
+                $stmt->close();
+            } else {
+                // User-friendly error
+                $_SESSION['error_message'] = "A database error occurred. Could not prepare the delete operation.";
+            }
+        } else {
+            // User-friendly error
+            $_SESSION['error_message'] = "Invalid ID provided. The item could not be found to delete.";
+        }
     }
+    // Default redirect if no other action
+    header("Location: expenses.php"); 
+    exit();
 }
 
-// Fetch initial data - Ensure expe_id is selected
+// --- NEW: Check for saved form data from a previous error ---
+$form_data = $_SESSION['form_data'] ?? [];
+$open_modal = $_SESSION['open_modal'] ?? null;
+unset($_SESSION['form_data'], $_SESSION['open_modal']);
+
+
+// Fetch initial data
 $expenses_q = $conn->query("
     SELECT expe_id, expense, amount, store_or_merchant, person_in_charge, created_at, DATE(created_at) as date_created_only
     FROM expenses
@@ -186,6 +300,12 @@ $expenses_q = $conn->query("
 $error_message = $_SESSION['error_message'] ?? null;
 $success_message = $_SESSION['success_message'] ?? null;
 unset($_SESSION['error_message'], $_SESSION['success_message']);
+
+// --- NEW: Check for main query failure ---
+if ($expenses_q === false && !$error_message) {
+    // Only set this if no other error is pending
+    $error_message = "A fatal error occurred. Could not load expenses data from the database. Please refresh the page.";
+}
 
 ?>
 <!doctype html>
@@ -250,99 +370,114 @@ unset($_SESSION['error_message'], $_SESSION['success_message']);
 </head>
 <body>
 <aside class="sidebar">
-  <nav class="side-menu">
-    <?php if ($role === 'admin'): ?>
-    <a href="../dashboard.php"><i class="fa fa-chart-pie"></i><span class="label">Dashboard</span></a>
-    <?php endif; ?>
-    <a href="collections.php" ><i class="fa fa-cash-register"></i><span class="label">Transactions</span></a>
-    <?php if ($role === 'admin'): ?>
-    <a href="../users.php"><i class="fa fa-users-cog"></i><span class="label">Users</span></a>
-    <?php endif; ?>
-    <a href="../logout.php"><i class="fa fa-sign-out-alt"></i><span class="label">Logout</span></a>
-  </nav>
+    <nav class="side-menu">
+        <?php if ($role === 'admin'): ?>
+        <a href="../dashboard.php"><i class="fa fa-chart-pie"></i><span class="label">Dashboard</span></a>
+        <?php endif; ?>
+        <a href="collections.php" ><i class="fa fa-cash-register"></i><span class="label">Transactions</span></a>
+        <?php if ($role === 'admin'): ?>
+        <a href="../users.php"><i class="fa fa-users-cog"></i><span class="label">Users</span></a>
+        <?php endif; ?>
+        <a href="../logout.php"><i class="fa fa-sign-out-alt"></i><span class="label">Logout</span></a>
+    </nav>
 </aside>
 
 <main class="main">
-  <div class="header">
-    <h1>Expenses</h1>
-    <div class="user-info">Logged in as: <b><?= htmlspecialchars($current_display_name) ?></b></div>
+    <div class="header">
+        <h1>Expenses</h1>
+        <div class="user-info">Logged in as: <b><?= htmlspecialchars($current_display_name) ?></b></div>
     </div>
 
-  <div class="top-tabs">
-    <div class="tab" onclick="location.href='collections.php'">Collections</div>
-    <div class="tab" onclick="location.href='receivables.php'">Receivables</div>
-    <div class="tab active">Expenses</div> </div>
-
-  <div class="toolbar">
-    <input type="text" id="searchInput" placeholder="🔍 Search...">
-    <button class="btn primary" id="openAddBtn"><i class="fa fa-plus"></i> New Expense</button>
-    <button class="btn small" id="generatePdfBtn" style="margin-left: 10px;"><i class="fa fa-file-pdf"></i> PDF Current View</button>
-    <div style="margin-left:auto">
-      <input type="number" id="rowsPerPageInput" placeholder="Rows / page" style="width:120px;padding:8px;border-radius:8px;border:1px solid #ddd" value="8" min="1">
+    <div class="top-tabs">
+        <div class="tab" onclick="location.href='collections.php'">Collections</div>
+        <div class="tab" onclick="location.href='receivables.php'">Receivables</div>
+        <div class="tab active">Expenses</div>
+        <?php if ($is_admin): ?>
+            <div class="tab" onclick="location.href='transaction_logs.php'">Logs</div>
+        <?php endif; ?>
     </div>
-  </div>
 
-  <div class="table-card">
-    <table id="expensesTable">
-      <thead>
-        <tr>
-          <th data-key="date_created_only">Date <i class="fa fa-sort sort-icon"></i></th>
-          <th data-key="expense">Expense <i class="fa fa-sort sort-icon"></i></th>
-          <th data-key="store_or_merchant">Store/Merchant <i class="fa fa-sort sort-icon"></i></th>
-          <th data-key="amount">Amount <i class="fa fa-sort sort-icon"></i></th>
-          <th data-key="person_in_charge">In-Charge <i class="fa fa-sort sort-icon"></i></th>
-          <th>Action</th>
-        </tr>
-      </thead>
-      <tbody>
-        <?php
-         if ($expenses_q) {
-            while ($r = $expenses_q->fetch_assoc()):
-                $primary_key = $r['expe_id'] ?? null; // Use expe_id
-                if ($primary_key === null) continue;
+    <div class="toolbar">
+        <input type="text" id="searchInput" placeholder="🔍 Search...">
+        <button class="btn primary" id="openAddBtn"><i class="fa fa-plus"></i> New Expense</button>
+        <button class="btn small" id="generatePdfBtn" style="margin-left: 10px;"><i class="fa fa-file-pdf"></i> PDF Current View</button>
+        <div style="margin-left:auto">
+            <input type="number" id="rowsPerPageInput" placeholder="Rows / page" style="width:120px;padding:8px;border-radius:8px;border:1px solid #ddd" value="8" min="1">
+        </div>
+    </div>
 
-                $data = htmlentities(json_encode($r), ENT_QUOTES, 'UTF-8');
-                $date_formatted = !empty($r['date_created_only']) ? date('M d, Y', strtotime($r['date_created_only'])) : '';
-        ?>
-          <tr data-row='<?= $data ?>'>
-            <td><?= $date_formatted ?></td>
-            <td><?= htmlspecialchars($r['expense']) ?></td>
-            <td><?= htmlspecialchars($r['store_or_merchant']) ?></td>
-            <td>₱<?= number_format($r['amount'],2) ?></td>
-            <td><?= htmlspecialchars($r['person_in_charge']) ?></td>
-            <td>
-              <button class="icon-btn editBtn" title="Edit"><i class="fa fa-pen"></i></button>
-              <button class="icon-btn deleteBtn" title="Delete"><i class="fa fa-trash"></i></button>
-            </td>
-          </tr>
-        <?php
-            endwhile;
-          } else { echo "<tr><td colspan='6'>Error fetching expenses: " . $conn->error . "</td></tr>"; }
-         ?>
-      </tbody>
-    </table>
-    <div class="pagination" id="pagination"></div>
-  </div>
+    <div class="table-card">
+        <table id="expensesTable">
+            <thead>
+                <tr>
+                    <th data-key="date_created_only">Date <i class="fa fa-sort sort-icon"></i></th>
+                    <th data-key="expense">Expense <i class="fa fa-sort sort-icon"></i></th>
+                    <th data-key="store_or_merchant">Store/Merchant <i class="fa fa-sort sort-icon"></i></th>
+                    <th data-key="amount">Amount <i class="fa fa-sort sort-icon"></i></th>
+                    <th data-key="person_in_charge">In-Charge <i class="fa fa-sort sort-icon"></i></th>
+                    <th>Action</th>
+                </tr>
+            </thead>
+            <tbody>
+                <?php
+                // Use the check for $expenses_q from before the <html> tag
+                if ($expenses_q) {
+                    while ($r = $expenses_q->fetch_assoc()):
+                        $primary_key = $r['expe_id'] ?? null; // Use expe_id
+                        if ($primary_key === null) continue;
+
+                        $data = htmlentities(json_encode($r), ENT_QUOTES, 'UTF-8');
+                        $date_formatted = !empty($r['date_created_only']) ? date('M d, Y', strtotime($r['date_created_only'])) : '';
+                ?>
+                <tr data-row='<?= $data ?>'>
+                    <td><?= $date_formatted ?></td>
+                    <td><?= htmlspecialchars($r['expense']) ?></td>
+                    <td><?= htmlspecialchars($r['store_or_merchant']) ?></td>
+                    <td>₱<?= number_format($r['amount'],2) ?></td>
+                    <td><?= htmlspecialchars(strtoupper($r['person_in_charge'])) ?></td>
+                    <td>
+                        <button class="icon-btn editBtn" title="Edit"><i class="fa fa-pen"></i></button>
+                        <?php if ($is_admin): ?>
+                            <button class="icon-btn deleteBtn" title="Delete"><i class="fa fa-trash"></i></button>
+                        <?php endif; ?>
+                    </td>
+                </tr>
+                <?php
+                    endwhile;
+                    $expenses_q->free(); // Free result set
+                } else {
+                    // The main error is now shown in a SweetAlert
+                    echo "<tr><td colspan='6' style='text-align:center;color:var(--danger);'>Could not load data. An error was reported.</td></tr>";
+                }
+                ?>
+            </tbody>
+        </table>
+        <div class="pagination" id="pagination"></div>
+    </div>
 </main>
 
 <div class="modal" id="modalAdd">
-  <div class="modal-content">
-    <h2 id="addTitle">New Expense</h2>
-    <form method="post" id="formAdd" action="expenses.php">
-        <input type="hidden" name="action" id="formAddAction" value="add">
-        <input type="hidden" name="expe_id" id="formAddId" value="">
-        <label>Expense</label>
-        <input type="text" name="expense" id="expense" required>
-        <label>Store/Merchant (optional)</label>
-        <input type="text" name="store_or_merchant" id="store_or_merchant">
-        <label>Amount</label>
-        <input type="number" step="0.01" name="amount" id="amount" required min="0.01">
-        <div class="actions">
-            <button type="button" class="btn" id="closeAdd">Cancel</button>
-            <button type="submit" class="btn primary">Save</button>
-        </div>
-    </form>
-  </div>
+    <div class="modal-content">
+        <h2 id="addTitle">New Expense</h2>
+        <form method="post" id="formAdd" action="expenses.php">
+            <input type="hidden" name="action" id="formAddAction" value="<?= htmlspecialchars($form_data['action'] ?? 'add') ?>">
+            <input type="hidden" name="expe_id" id="formAddId" value="<?= htmlspecialchars($form_data['expe_id'] ?? '') ?>">
+            
+            <label>Expense</label>
+            <input type="text" name="expense" id="expense" required value="<?= htmlspecialchars($form_data['expense'] ?? '') ?>">
+            
+            <label>Store/Merchant (optional)</label>
+            <input type="text" name="store_or_merchant" id="store_or_merchant" value="<?= htmlspecialchars($form_data['store_or_merchant'] ?? '') ?>">
+            
+            <label>Amount</label>
+            <input type="number" step="0.01" name="amount" id="amount" required min="0.01" value="<?= htmlspecialchars($form_data['amount'] ?? '') ?>">
+            
+            <div class="actions">
+                <button type="button" class="btn" id="closeAdd">Cancel</button>
+                <button type="submit" class="btn primary">Save</button>
+            </div>
+        </form>
+    </div>
 </div>
 
 
@@ -353,10 +488,15 @@ unset($_SESSION['error_message'], $_SESSION['success_message']);
 </form>
 
 <script>
+    const FPDF_MISSING = <?= defined('FPDF_MISSING') ? 'true' : 'false' ?>;
+    const MODAL_TO_OPEN = '<?= $open_modal ?? '' ?>';
+</script>
+
+<script>
 /* DOM helpers & initial state - Same */
 const searchInput = document.getElementById('searchInput');
 const rowsPerPageInput = document.getElementById('rowsPerPageInput');
-const allRows = Array.from(document.querySelectorAll('#expensesTable tbody tr'));
+const allRows = Array.from(document.querySelectorAll('#expensesTable tbody tr[data-row]')); // Only select data rows
 const generatePdfBtn = document.getElementById('generatePdfBtn');
 const pdfForm = document.getElementById('pdfForm');
 const pdfDataInput = document.getElementById('pdfDataInput');
@@ -374,51 +514,97 @@ const openAddBtn = document.getElementById('openAddBtn');
 const closeAdd = document.getElementById('closeAdd');
 const addTitle = document.getElementById('addTitle');
 
-openAddBtn.onclick = () => { /* Same */
-  formAdd.reset(); document.getElementById('formAddAction').value = 'add';
-  document.getElementById('formAddId').value = ''; addTitle.textContent = 'New Expense';
-  modalAdd.classList.add('active');
+// --- NEW: Helper function to clear original data ---
+function clearModalData() {
+    delete formAdd.dataset.originalExpense;
+    delete formAdd.dataset.originalStore;
+    delete formAdd.dataset.originalAmount;
+}
+
+openAddBtn.onclick = () => {
+    formAdd.reset(); 
+    document.getElementById('formAddAction').value = 'add';
+    document.getElementById('formAddId').value = ''; 
+    addTitle.textContent = 'New Expense';
+    
+    // --- NEW: Clear original data cache ---
+    clearModalData();
+    
+    modalAdd.classList.add('active');
 };
-closeAdd.onclick = () => modalAdd.classList.remove('active');
+closeAdd.onclick = () => {
+    modalAdd.classList.remove('active');
+    clearModalData(); // --- NEW: Clear data on cancel ---
+};
 
 document.querySelectorAll('.editBtn').forEach(btn=>{
-  btn.onclick = (e)=>{
-    const tr = btn.closest('tr'); const data = JSON.parse(tr.dataset.row);
-    formAdd.reset();
-    document.getElementById('formAddAction').value = 'edit';
-    document.getElementById('formAddId').value = data.expe_id; // Use expe_id
-    document.getElementById('expense').value = data.expense;
-    document.getElementById('store_or_merchant').value = data.store_or_merchant || '';
-    document.getElementById('amount').value = parseFloat(data.amount || 0).toFixed(2);
-    // Person in charge removed from edit form UI, handled server-side
-    addTitle.textContent = 'Edit Expense'; modalAdd.classList.add('active');
-  }
+    btn.onclick = (e)=>{
+        // Clear form first in case it was repopulated from an error
+        formAdd.reset();
+        const tr = btn.closest('tr'); const data = JSON.parse(tr.dataset.row);
+        const originalAmount = parseFloat(data.amount || 0).toFixed(2);
+        const originalStore = data.store_or_merchant || '';
+
+        document.getElementById('formAddAction').value = 'edit';
+        document.getElementById('formAddId').value = data.expe_id; // Use expe_id
+        document.getElementById('expense').value = data.expense;
+        document.getElementById('store_or_merchant').value = originalStore;
+        document.getElementById('amount').value = originalAmount;
+        
+        // --- NEW: Store original data ---
+        formAdd.dataset.originalExpense = data.expense;
+        formAdd.dataset.originalStore = originalStore;
+        formAdd.dataset.originalAmount = originalAmount;
+
+        addTitle.textContent = 'Edit Expense'; 
+        modalAdd.classList.add('active');
+    }
 });
 
 
 /* Delete - SweetAlert - Use expe_id */
 document.querySelectorAll('.deleteBtn').forEach(btn=>{
-  btn.onclick = ()=>{
-    const data = JSON.parse(btn.closest('tr').dataset.row); const expe_id = data.expe_id; // Use expe_id
-    Swal.fire({
-        title: 'Are you sure?', text: `Delete expense: ${data.expense}?`, icon: 'warning',
-        showCancelButton: true, confirmButtonText: 'Yes, delete it!', buttonsStyling: false,
-        customClass: { confirmButton: 'btn primary', cancelButton: 'btn' }
-    }).then((result) => {
-        if (result.isConfirmed) {
-            const form = document.createElement('form'); form.method = 'POST'; form.action = 'expenses.php';
-            // Use expe_id
-            form.innerHTML = `<input type="hidden" name="action" value="delete"><input type="hidden" name="expe_id" value="${expe_id}">`;
-            document.body.appendChild(form); form.submit();
-        }
-    });
-  }
+    btn.onclick = ()=>{
+        const data = JSON.parse(btn.closest('tr').dataset.row); const expe_id = data.expe_id; // Use expe_id
+        // MODIFIED: More descriptive user-friendly text
+        Swal.fire({
+            title: 'Are you sure?',
+            text: `This will permanently delete the expense '${data.expense}'. You cannot undo this.`,
+            icon: 'warning',
+            showCancelButton: true, confirmButtonText: 'Yes, delete it!', buttonsStyling: false,
+            customClass: { confirmButton: 'btn primary', cancelButton: 'btn' }
+        }).then((result) => {
+            if (result.isConfirmed) {
+                const form = document.createElement('form'); form.method = 'POST'; form.action = 'expenses.php';
+                form.innerHTML = `<input type="hidden" name="action" value="delete"><input type="hidden" name="expe_id" value="${expe_id}">`;
+                document.body.appendChild(form); form.submit();
+            }
+        });
+    }
 });
 
 /* --- Filter, Sort, Pagination --- Same */
 function getFilteredRows() { const q = searchInput.value.toLowerCase().trim(); return allRows.filter(r => { const tc = r.textContent.toLowerCase(); return !q || tc.includes(q); }); }
 function sortRows(rowsToSort, key, asc) { rowsToSort.sort((a, b) => { const A_d = JSON.parse(a.dataset.row); const B_d = JSON.parse(b.dataset.row); let A = A_d[key]; let B = B_d[key]; if (key === 'amount') { const nA = parseFloat(A) || 0; const nB = parseFloat(B) || 0; return asc ? (nA - nB) : (nB - nA); } if (key === 'date_created_only') { A = A_d['created_at'] || 0; B = B_d['created_at'] || 0; const dA = new Date(A); const dB = new Date(B); return asc ? dA - dB : dB - dA; } const sa = (A || '').toString().toLowerCase(); const sb = (B || '').toString().toLowerCase(); return asc ? sa.localeCompare(sb) : sb.localeCompare(sa); }); }
-function renderTable() { const fr = getFilteredRows(); sortRows(fr, currentSortKey, currentSortAsc); const tb = document.querySelector('#expensesTable tbody'); tb.innerHTML = ''; const st = (currentPage - 1) * rowsPerPage; const en = st + rowsPerPage; const pr = fr.slice(st, en); pr.forEach(r => tb.appendChild(r)); renderPagination(fr.length); }
+function renderTable() { 
+    const fr = getFilteredRows(); 
+    sortRows(fr, currentSortKey, currentSortAsc); 
+    const tb = document.querySelector('#expensesTable tbody'); 
+    tb.innerHTML = ''; 
+    const st = (currentPage - 1) * rowsPerPage; 
+    const en = st + rowsPerPage; 
+    const pr = fr.slice(st, en); 
+    
+    if (pr.length === 0 && allRows.length > 0) {
+        tb.innerHTML = '<tr><td colspan="6" style="text-align:center;">No expenses found matching your search.</td></tr>';
+    } else if (allRows.length === 0 && <?= $expenses_q ? 'true' : 'false' ?>) {
+        tb.innerHTML = '<tr><td colspan="6" style="text-align:center;">No expenses have been recorded yet.</td></tr>';
+    } else {
+        pr.forEach(r => tb.appendChild(r)); 
+    }
+    
+    renderPagination(fr.length); 
+}
 function renderPagination(total) { const c = document.getElementById('pagination'); c.innerHTML = ''; const tp = Math.max(1, Math.ceil(total / rowsPerPage)); if (tp <= 1) return; for (let i = 1; i <= tp; i++) { const b = document.createElement('button'); b.textContent = i; if (i === currentPage) b.classList.add('active'); b.onclick = () => { currentPage = i; renderTable(); }; c.appendChild(b); } }
 
 /* --- Event Listeners --- Same */
@@ -426,31 +612,166 @@ searchInput.addEventListener('input', () => { currentPage = 1; renderTable(); })
 rowsPerPageInput.addEventListener('change', () => { let nr = parseInt(rowsPerPageInput.value); if (nr > 0) { rowsPerPage = nr; } else { rowsPerPageInput.value = rowsPerPage; } currentPage = 1; renderTable(); });
 document.querySelectorAll('th[data-key]').forEach(th => { th.addEventListener('click', () => { const k = th.dataset.key; if (currentSortKey === k) { currentSortAsc = !currentSortAsc; } else { currentSortKey = k; currentSortAsc = true; } document.querySelectorAll('.sort-icon').forEach(i => i.className = 'fa fa-sort sort-icon'); th.querySelector('.sort-icon').className = currentSortAsc ? 'fa fa-sort-up sort-icon' : 'fa fa-sort-down sort-icon'; currentPage = 1; renderTable(); }); });
 
-/* PDF Generation Button Listener - Same */
+/* PDF Generation Button Listener - NEW FPDF Check */
 generatePdfBtn.addEventListener('click', () => {
+    // NEW: User-friendly SweetAlert check for missing library
+    if (typeof FPDF_MISSING !== 'undefined' && FPDF_MISSING) {
+        Swal.fire({
+            icon: 'error',
+            title: 'PDF Generation Error',
+            text: 'The PDF library (FPDF) is missing on the server. Please contact an administrator to fix the installation.',
+            buttonsStyling: false,
+            customClass: { confirmButton: 'btn primary' }
+        });
+        return; // Stop the PDF generation
+    }
+
     const filteredAndSortedRows = getFilteredRows(); sortRows(filteredAndSortedRows, currentSortKey, currentSortAsc);
-    const dataForPdf = filteredAndSortedRows.map(row => { const rowData = JSON.parse(row.dataset.row); const cells = row.getElementsByTagName('td'); return { date: cells[0]?.textContent||'', expense: cells[1]?.textContent||'', store: cells[2]?.textContent||'', amount_display: cells[3]?.textContent||'₱ 0.00', incharge: cells[4]?.textContent||'', amount: parseFloat(rowData.amount||0) }; });
+    const dataForPdf = filteredAndSortedRows.map(row => {
+        const rowData = JSON.parse(row.dataset.row); const cells = row.getElementsByTagName('td');
+        // MODIFIED: textContent from cells is now uppercase for incharge
+        return {
+            date: cells[0]?.textContent||'',
+            expense: cells[1]?.textContent||'',
+            store: cells[2]?.textContent||'',
+            amount_display: cells[3]?.textContent||'₱ 0.00',
+            incharge: cells[4]?.textContent||'', // Already uppercase
+            amount: parseFloat(rowData.amount||0)
+        };
+    });
     const filtersForPdf = { search: searchInput.value, sortKey: currentSortKey, sortAsc: currentSortAsc };
     pdfDataInput.value = JSON.stringify(dataForPdf); pdfFiltersInput.value = JSON.stringify(filtersForPdf); pdfForm.submit();
 });
 
-/* --- Form Validation & Modal Close --- Removed person validation */
+/* --- Form Validation & Modal Close --- */
 renderTable();
+
+// --- MODIFIED: Form submit listener with "no change" and "confirm" logic ---
 formAdd.addEventListener('submit', function(e){
-  const expense = document.getElementById('expense').value.trim();
-  const amount = parseFloat(document.getElementById('amount').value);
-  // Person in charge is automatic, no need for validation here
-
-  if (!expense || isNaN(amount) || amount <= 0) {
-    e.preventDefault();
-    Swal.fire({ icon: 'error', title: 'Validation Error', text: 'Expense name and valid amount (>0) are required.', buttonsStyling: false, customClass: { confirmButton: 'btn primary' } });
-    return false;
-  }
+    // Prevent immediate submission to validate first
+    e.preventDefault(); 
+    
+    const action = document.getElementById('formAddAction').value;
+    const expense = document.getElementById('expense').value.trim();
+    const store = document.getElementById('store_or_merchant').value.trim();
+    const amountFloat = parseFloat(document.getElementById('amount').value);
+    let err = '';
+    
+    // --- 1. Client-side Validation (for both add and edit) ---
+    if (!expense) {
+        err = 'Please enter an expense name.';
+    } else if (isNaN(amountFloat) || amountFloat <= 0) {
+        err = 'Please enter a valid amount that is greater than 0.';
+    }
+    
+    if (err) {
+        Swal.fire({
+            icon: 'error',
+            title: 'Oops... Please check the form',
+            text: err,
+            buttonsStyling: false,
+            customClass: { confirmButton: 'btn primary' }
+        });
+        return false; // Stop processing
+    }
+    
+    // --- 2. Handle based on action ---
+    if (action === 'add') {
+        // For 'add', just submit. No confirmation needed.
+        formAdd.submit();
+        
+    } else if (action === 'edit') {
+        // --- 3. Check for changes (for 'edit' only) ---
+        const originalExpense = formAdd.dataset.originalExpense || '';
+        const originalStore = formAdd.dataset.originalStore || '';
+        const originalAmount = formAdd.dataset.originalAmount || '0.00';
+        
+        const currentAmountFormatted = amountFloat.toFixed(2);
+        
+        const noChanges = (
+            expense === originalExpense &&
+            store === originalStore &&
+            currentAmountFormatted === originalAmount
+        );
+    
+        if (noChanges) {
+            // --- Goal 1: No changes detected ---
+            Swal.fire({
+                icon: 'info',
+                title: 'No Changes Detected',
+                text: 'You have not made any changes to the expense.',
+                confirmButtonText: 'OK',
+                buttonsStyling: false,
+                customClass: { confirmButton: 'btn primary' }
+            });
+            // Stay in modal, submission is already prevented
+            
+        } else {
+            // --- Goal 2: Changes detected, ask for confirmation ---
+            Swal.fire({
+                title: 'Confirm Update',
+                text: 'Are you sure you want to save these changes?',
+                icon: 'question',
+                showCancelButton: true,
+                confirmButtonText: 'Yes, update it!',
+                cancelButtonText: 'Cancel',
+                buttonsStyling: false,
+                customClass: {
+                    confirmButton: 'btn primary',
+                    cancelButton: 'btn'
+                }
+            }).then((result) => {
+                if (result.isConfirmed) {
+                    // User confirmed, now we submit the form
+                    formAdd.submit();
+                }
+                // If result.isDismissed (cancel), do nothing. Modal stays open.
+            });
+        }
+    }
 });
-document.querySelectorAll('.modal').forEach(m=>{ m.addEventListener('click', (ev)=>{ if (ev.target === m) m.classList.remove('active'); }); });
 
-// Display feedback messages from PHP - Same
-document.addEventListener('DOMContentLoaded', () => { <?php if ($success_message): ?> Swal.fire({ icon: 'success', title: 'Success', text: '<?= addslashes($success_message) ?>', timer: 2500, showConfirmButton: false }); <?php elseif ($error_message): ?> Swal.fire({ icon: 'error', title: 'Error', text: '<?= addslashes($error_message) ?>', confirmButtonText: 'OK', buttonsStyling: false, customClass: { confirmButton: 'btn primary' } }); <?php endif; ?> });
+document.querySelectorAll('.modal').forEach(m=>{ 
+    m.addEventListener('click', (ev)=>{ 
+        if (ev.target === m) {
+            m.classList.remove('active');
+            clearModalData(); // --- NEW: Clear data on backdrop click ---
+        }
+    }); 
+});
+
+// Display feedback messages from PHP
+document.addEventListener('DOMContentLoaded', () => {
+    <?php if ($success_message): ?>
+    Swal.fire({
+        icon: 'success', title: 'Success!',
+        text: '<?= addslashes($success_message) ?>',
+        timer: 2500, showConfirmButton: false
+    });
+    <?php elseif ($error_message): ?>
+    Swal.fire({
+        icon: 'error', title: 'An Error Occurred',
+        text: '<?= addslashes($error_message) ?>', // This now shows the user-friendly PHP message
+        confirmButtonText: 'OK', buttonsStyling: false,
+        customClass: { confirmButton: 'btn primary' }
+    });
+    <?php endif; ?>
+
+    // --- NEW: Check if PHP told us to re-open a modal ---
+    if (MODAL_TO_OPEN) {
+        const modalToOpen = document.querySelector(MODAL_TO_OPEN);
+        if (modalToOpen) {
+            // Repopulate title based on action
+            const action = document.getElementById('formAddAction').value;
+            if (action === 'edit') {
+                document.getElementById('addTitle').textContent = 'Edit Expense';
+            } else {
+                document.getElementById('addTitle').textContent = 'New Expense';
+            }
+            modalToOpen.classList.add('active');
+        }
+    }
+});
 </script>
 </body>
 </html>

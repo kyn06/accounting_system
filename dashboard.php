@@ -1,24 +1,24 @@
 <?php
-session_start();
+session_start(); // FIRST line
+
+// Prevent browser caching FOR PROTECTED PAGES TOO (Stricter Approach)
+header("Cache-Control: no-store, no-cache, must-revalidate, max-age=0");
+header("Pragma: no-cache");
+header("Expires: 0"); // Expire immediately
+
 require_once "db.php"; // Database connection
 
-// --- Security Check: Ensure user is logged in ---
-if (!isset($_SESSION['user_id'])) {
-    header("Location: index.php");
+// --- Security Check: Redirect IF NOT logged in or NOT admin ---
+// NOTE: We check BOTH user_id and role here for admin-only pages
+if (!isset($_SESSION['user_id']) || !isset($_SESSION['role']) || $_SESSION['role'] !== 'admin') {
+    header("Location: index.php"); // Redirect non-admins/logged-out users
     exit();
 }
 
 $user_id = $_SESSION['user_id'];
 $user_name = $_SESSION['name'] ?? $_SESSION['username'] ?? 'User'; // Use name, fallback to username
 $user_role = $_SESSION['role'] ?? 'user';
-$is_admin = ($user_role === 'admin');
-
-// Restrict dashboard page to admin users only
-if (!$is_admin) {
-    // Redirect non-admin users to the Transactions -> Collections page
-    header("Location: transactions/collections.php");
-    exit();
-}
+$is_admin = ($user_role === 'admin'); // Already confirmed above, but keep for consistency
 
 // *** HELPER FUNCTIONS (Keep as before) ***
 function fetch_val($conn, $sql) {
@@ -72,7 +72,6 @@ if (isset($_GET['generate_pdf']) && $is_admin) {
         default: die("Invalid period type.");
     }
     $date_condition_datetime = "transaction_datetime BETWEEN '$start_date_time' AND '$end_date_time'";
-    // $date_condition_date = "date_of_payment BETWEEN '$start_date_only' AND '$end_date_only'"; // No longer needed for income
     $created_condition_datetime = "created_at BETWEEN '$start_date_time' AND '$end_date_time'";
 
 
@@ -105,7 +104,6 @@ if (isset($_GET['generate_pdf']) && $is_admin) {
     $filename_suffix = strtolower($report_type) . '_' . strtolower($period_type) . '_' . date('Ymd');
     $main_title = '';
      if ($report_type === 'collections') {
-        // Collections report remains the same, showing individual collection entries
          $main_title = 'Collections Report';
          $sql = "SELECT client_name, affiliation, reference_number, amount, cash_received, (amount - IFNULL(cash_received,0)) as unpaid, mode_of_payment, person_in_charge, DATE(created_at) as date
                  FROM collections WHERE $date_condition_datetime ORDER BY created_at ASC";
@@ -117,9 +115,8 @@ if (isset($_GET['generate_pdf']) && $is_admin) {
          $filename_suffix = 'collections_' . $filename_suffix;
      }
      elseif ($report_type === 'expenses') {
-        // Expenses report remains the same
          $main_title = 'Expenses Report';
-         $sql = "SELECT expense, store_or_merchant, amount, person_in_charge, DATE(created_at) as date FROM expenses WHERE $created_condition_datetime ORDER BY created_at ASC"; // Use created_at for expenses
+         $sql = "SELECT expense, store_or_merchant, amount, person_in_charge, DATE(created_at) as date FROM expenses WHERE $created_condition_datetime ORDER BY created_at ASC";
          $data = fetch_report_data($conn, $sql); $total_expenses = 0; $table_data = [];
          foreach ($data as $row) { $table_data[] = [ $row['date'], $row['expense'], $row['store_or_merchant'], number_format($row['amount'], 2), $row['person_in_charge'], ]; $total_expenses += $row['amount']; }
          $pdf->setReportHeader($main_title, $period_label, $user_name);
@@ -128,7 +125,6 @@ if (isset($_GET['generate_pdf']) && $is_admin) {
          $filename_suffix = 'expenses_' . $filename_suffix;
      }
      elseif ($report_type === 'receivables') {
-        // Receivables report remains the same
           $main_title = 'Receivables Report';
           $sql_added = "SELECT client_name, affiliation, reference_number, amount, DATE(created_at) as date FROM receivables WHERE $created_condition_datetime ORDER BY created_at ASC";
           $data_added = fetch_report_data($conn, $sql_added); $total_added = 0;
@@ -144,33 +140,18 @@ if (isset($_GET['generate_pdf']) && $is_admin) {
           $filename_suffix = 'receivables_' . $filename_suffix;
      }
      elseif ($report_type === 'summary') {
-        // === UPDATED PDF SUMMARY LOGIC ===
          $main_title = 'Consolidated Financial Summary';
          $pdf->setReportHeader($main_title, $period_label, $user_name);
-
-         // Total Income = Sum of all collections within the period
          $total_inflow = fetch_report_value($conn, "SELECT IFNULL(SUM(cash_received),0) FROM collections WHERE $date_condition_datetime");
-
-         // Total Expenses = Sum of all expenses within the period (using created_at)
-         $total_outflow = fetch_report_value($conn, "SELECT IFNULL(SUM(amount),0) FROM expenses WHERE $created_condition_datetime"); // Use created_at condition
-
-         // Net Cash Flow
+         $total_outflow = fetch_report_value($conn, "SELECT IFNULL(SUM(amount),0) FROM expenses WHERE $created_condition_datetime");
          $net_cash_flow = $total_inflow - $total_outflow;
-
-         // Receivables Added during the period
          $receivables_added = fetch_report_value($conn, "SELECT IFNULL(SUM(amount),0) FROM receivables WHERE $created_condition_datetime");
-
-         // Total Outstanding Receivables at the END of the period
          $total_receivables_outstanding = fetch_report_value($conn, "SELECT IFNULL(SUM(amount - IFNULL(amount_paid, 0)), 0) FROM receivables WHERE created_at <= '$end_date_time' AND is_paid = 0");
-
          $pdf->SummarySection('Income / Inflows (Period)', [ 'TOTAL INFLOWS (All Collections)' => $total_inflow, ]);
          $pdf->SummarySection('Expenses / Outflows (Period)', [ 'TOTAL OUTFLOWS (Expenses)' => $total_outflow, ]);
          $pdf->SummarySection('Period Summary', [ 'Total Inflows' => $total_inflow, 'Total Outflows' => $total_outflow, 'NET CASH FLOW' => $net_cash_flow, ]);
          $pdf->SummarySection('Receivables Activity (Period)', [ 'New Receivables Added' => $receivables_added, 'TOTAL OUTSTANDING (End of Period)' => $total_receivables_outstanding, ]);
-
-         // Removed the note about estimated receivable payments as it's no longer used here
          $filename_suffix = 'summary_' . $filename_suffix;
-         // === END UPDATED PDF SUMMARY LOGIC ===
      }
      else { $pdf->SetFont('Arial','', 10); $pdf->Cell(0, 10, 'Invalid Report Type Selected.', 0, 1, 'C'); }
 
@@ -185,39 +166,32 @@ if (isset($_GET['generate_pdf']) && $is_admin) {
 
 
 // --- Data Fetching for Dashboard Display ---
-// === UPDATED CALCULATIONS ===
-$total_income = fetch_val($conn, "SELECT IFNULL(SUM(cash_received),0) AS val FROM collections"); // Income is sum of all collections
+$total_income = fetch_val($conn, "SELECT IFNULL(SUM(cash_received),0) AS val FROM collections");
 $total_expenses = fetch_val($conn, "SELECT IFNULL(SUM(amount),0) AS val FROM expenses");
 $total_receivables_outstanding = fetch_val($conn, "SELECT IFNULL(SUM(amount - IFNULL(amount_paid, 0)), 0) AS val FROM receivables WHERE is_paid = 0");
-$all_time_net = $total_income - $total_expenses; // Corrected Net
+$all_time_net = $total_income - $total_expenses;
 $unpaid_client_count = fetch_val($conn, "SELECT COUNT(DISTINCT client_name) AS val FROM receivables WHERE is_paid = 0");
 
 $current_month_start = date('Y-m-01 00:00:00'); $current_month_end = date('Y-m-t 23:59:59');
-$month_income = fetch_val($conn, "SELECT IFNULL(SUM(cash_received),0) AS val FROM collections WHERE transaction_datetime BETWEEN '$current_month_start' AND '$current_month_end'"); // Monthly income from collections
-$month_expenses = fetch_val($conn, "SELECT IFNULL(SUM(amount),0) AS val FROM expenses WHERE created_at BETWEEN '$current_month_start' AND '$current_month_end'"); // Use created_at for consistency
-$month_net = $month_income - $month_expenses; // Corrected Net
+$month_income = fetch_val($conn, "SELECT IFNULL(SUM(cash_received),0) AS val FROM collections WHERE transaction_datetime BETWEEN '$current_month_start' AND '$current_month_end'");
+$month_expenses = fetch_val($conn, "SELECT IFNULL(SUM(amount),0) AS val FROM expenses WHERE created_at BETWEEN '$current_month_start' AND '$current_month_end'");
+$month_net = $month_income - $month_expenses;
 
 $today = date('Y-m-d'); $today_start = $today . ' 00:00:00'; $today_end = $today . ' 23:59:59';
-$today_income = fetch_val($conn, "SELECT IFNULL(SUM(cash_received),0) AS val FROM collections WHERE transaction_datetime BETWEEN '$today_start' AND '$today_end'"); // Today's income from collections
-$today_expenses = fetch_val($conn, "SELECT IFNULL(SUM(amount),0) AS val FROM expenses WHERE created_at BETWEEN '$today_start' AND '$today_end'"); // Use created_at
-$today_net = $today_income - $today_expenses; // Calculate Today's Net
+$today_income = fetch_val($conn, "SELECT IFNULL(SUM(cash_received),0) AS val FROM collections WHERE transaction_datetime BETWEEN '$today_start' AND '$today_end'");
+$today_expenses = fetch_val($conn, "SELECT IFNULL(SUM(amount),0) AS val FROM expenses WHERE created_at BETWEEN '$today_start' AND '$today_end'");
+$today_net = $today_income - $today_expenses;
 $today_receivables_added = fetch_val($conn, "SELECT IFNULL(SUM(amount),0) AS val FROM receivables WHERE created_at BETWEEN '$today_start' AND '$today_end'");
 
-// === Monthly Chart (6 Months) - UPDATED INCOME SOURCE ===
 $months = []; $monthly_income = []; $monthly_expenses = []; $monthly_receivables_added = [];
 for ($i = 5; $i >= 0; $i--) {
     $label = date('M Y', strtotime("-$i month")); $months[] = $label;
     $start_dt = date('Y-m-01 00:00:00', strtotime("-$i month")); $end_dt = date('Y-m-t 23:59:59', strtotime("-$i month"));
-    // Income solely from collections table
     $monthly_income[] = fetch_val($conn, "SELECT IFNULL(SUM(cash_received),0) AS val FROM collections WHERE transaction_datetime BETWEEN '$start_dt' AND '$end_dt'");
-    // Expenses based on created_at for consistency with daily/monthly KPIs
     $monthly_expenses[] = fetch_val($conn, "SELECT IFNULL(SUM(amount),0) AS val FROM expenses WHERE created_at BETWEEN '$start_dt' AND '$end_dt'");
     $monthly_receivables_added[] = fetch_val($conn, "SELECT IFNULL(SUM(amount),0) AS val FROM receivables WHERE created_at BETWEEN '$start_dt' AND '$end_dt'");
 }
-// === END UPDATED CALCULATIONS ===
 
-
-// Get potential report error from session
 $report_error = $_SESSION['report_error'] ?? null;
 unset($_SESSION['report_error']);
 
@@ -233,6 +207,7 @@ unset($_SESSION['report_error']);
 <script src="https://unpkg.com/chart.js-plugin-labels-dv/dist/chartjs-plugin-labels.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
 <style>
+/* --- Your CSS Styles Remain the Same --- */
 :root {
   --accent:#d84c73; --accent-light:#ffb6c1; --accent-dark: #b83b5e;
   --bg1:#fff0f6; --bg2:#ffe6ee; --card:#ffffff;
@@ -240,8 +215,8 @@ unset($_SESSION['report_error']);
   --shadow:0 8px 25px rgba(216,76,115,0.08);
   --shadow-hover:0 12px 30px rgba(216,76,115,0.12);
   --success: #28a745; --danger: #dc3545; --info: #17a2b8; --warning: #ffc107;
-  --purple: #8e44ad; /* Slightly different purple */
-  --blue: #3498db;   /* Added blue for receivables */
+  --purple: #8e44ad;
+  --blue: #3498db;
   --sidebar-collapsed:72px; --sidebar-expanded:230px;
 }
 *{box-sizing:border-box;font-family:"Poppins",sans-serif;margin:0;padding:0}
@@ -260,18 +235,14 @@ nav.side-menu a:hover i { transform: scale(1.1); }
 .header{display:flex;justify-content:space-between;align-items:center;margin-bottom:30px; flex-wrap: wrap; gap: 15px;}
 .header h1{color:var(--accent-dark);font-size:26px;font-weight:700; margin-right: auto;}
 .user-info{font-size:14px;font-weight:500;background:var(--card);padding:10px 15px;border-radius:12px;box-shadow:var(--shadow); color: var(--text-dark);}
-
-/* KPI Cards - Added top border */
 .kpi-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:20px; margin-bottom: 35px;}
-.kpi-card{background:var(--card);border-radius:16px;padding:20px; box-shadow:var(--shadow);transition:transform .25s ease, box-shadow .25s ease; display: flex; flex-direction: column; border-top: 4px solid transparent; /* Base for colored border */}
+.kpi-card{background:var(--card);border-radius:16px;padding:20px; box-shadow:var(--shadow);transition:transform .25s ease, box-shadow .25s ease; display: flex; flex-direction: column; border-top: 4px solid transparent;}
 .kpi-card:hover{transform:translateY(-6px); box-shadow: var(--shadow-hover);}
-/* Colored top borders */
 .kpi-card.income-border { border-top-color: var(--success); }
 .kpi-card.expense-border { border-top-color: var(--danger); }
 .kpi-card.summary-border { border-top-color: var(--accent); }
 .kpi-card.receivable-border { border-top-color: var(--info); }
-.kpi-card.users-border { border-top-color: var(--warning); } /* Example if you add more */
-
+.kpi-card.users-border { border-top-color: var(--warning); }
 .kpi-header{display:flex;align-items:center;justify-content:space-between; margin-bottom: 12px;}
 .kpi-icon{width:45px;height:45px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:19px;}
 .kpi-icon.income{background-color: rgba(40, 167, 69, 0.1); color: var(--success);}
@@ -282,26 +253,19 @@ nav.side-menu a:hover i { transform: scale(1.1); }
 .kpi-title{font-size:13px;font-weight:500;color:var(--text-muted); line-height: 1.3;}
 .kpi-value{font-size:24px;font-weight:700;color:var(--text-dark); margin-bottom: 8px; line-height: 1.2;}
 .kpi-footer{font-size:11px; color: #aaa; margin-top: auto;}
-
-/* Charts Section */
 .charts-section{display:grid;grid-template-columns: repeat(auto-fit, minmax(350px, 1fr)); gap:25px;margin-bottom: 35px;}
 .chart-card{ background:var(--card); border-radius:16px; box-shadow:var(--shadow); padding:30px 25px; position: relative; display: flex; flex-direction: column; transition:transform .25s ease, box-shadow .25s ease;}
 .chart-card:hover{transform:translateY(-6px); box-shadow: var(--shadow-hover);}
 .chart-card h3{color:var(--text-dark);margin-bottom:25px; text-align: center; font-weight: 600; font-size: 18px;}
 .chart-container { position: relative; width: 100%; flex-grow: 1; min-height: 280px; }
-.chart-card p { margin-top: 15px; font-size: 13px; font-weight:500; text-align: center; color: var(--text-muted); line-height: 1.5;} /* Adjusted text below doughnut */
-
+.chart-card p { margin-top: 15px; font-size: 13px; font-weight:500; text-align: center; color: var(--text-muted); line-height: 1.5;}
 @media (max-width: 992px) { .charts-section { grid-template-columns: 1fr; } .kpi-cards{grid-template-columns:repeat(auto-fit,minmax(200px,1fr));} }
 @media (max-width: 768px) { .header h1 { font-size: 22px; } .main { padding: 20px; } .kpi-value { font-size: 22px; } .kpi-icon { width: 40px; height: 40px; font-size: 18px; } }
-
-/* Global Button Styles */
 .btn{ border: none; border-radius: 8px; padding: 10px 18px; font-weight: 600; cursor: pointer; transition: all 0.25s ease; background: var(--accent-light); color: var(--accent-dark); margin: 0 5px; font-family:"Poppins",sans-serif; font-size: 14px;}
 .btn:hover { background: var(--accent); color: #fff; transform: translateY(-2px); box-shadow: 0 4px 15px rgba(216,76,115,0.2);}
 .btn.primary{ background:var(--accent); color:#fff;}
 .btn.primary:hover{ background: var(--accent-dark); transform:translateY(-2px); box-shadow: 0 4px 15px rgba(216,76,115,0.3);}
 .btn i { margin-right: 8px; }
-
-/* Modal Styles */
 .modal { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.5); display: none; justify-content: center; align-items: center; z-index: 1000; backdrop-filter: blur(5px); padding: 15px;}
 .modal.active { display: flex; animation: fadeIn .3s ease; }
 .modal-content { background: var(--card); border-radius: 16px; padding: 30px; width: 500px; max-width: 95%; box-shadow: 0 10px 40px rgba(0,0,0,0.15); animation: slideUp .35s ease; position: relative; }
@@ -336,7 +300,7 @@ nav.side-menu a:hover i { transform: scale(1.1); }
     <button class="btn primary" id="openReportModalBtn"><i class="fa fa-file-pdf"></i> Generate PDF Report</button>
     <?php endif; ?>
     <div class="user-info">
-      Logged in as: <b><?= htmlspecialchars($user_name) ?></b> 
+      Logged in as: <b><?= strtoupper($user_name) ?></b>
     </div>
   </div>
 
@@ -451,10 +415,10 @@ nav.side-menu a:hover i { transform: scale(1.1); }
     const rootStyles = getComputedStyle(document.documentElement);
     const accentColor = rootStyles.getPropertyValue('--accent').trim();
     const purpleColor = rootStyles.getPropertyValue('--purple').trim();
-    const blueColor = rootStyles.getPropertyValue('--blue').trim(); // Use blue for receivables
+    const blueColor = rootStyles.getPropertyValue('--blue').trim();
     const mutedColor = rootStyles.getPropertyValue('--text-muted').trim();
-    const successColor = rootStyles.getPropertyValue('--success').trim(); // Get success color
-    const dangerColor = rootStyles.getPropertyValue('--danger').trim(); // Get danger color
+    const successColor = rootStyles.getPropertyValue('--success').trim();
+    const dangerColor = rootStyles.getPropertyValue('--danger').trim();
 
 
     // --- Chart Default Styling ---
@@ -465,26 +429,21 @@ nav.side-menu a:hover i { transform: scale(1.1); }
     Chart.defaults.plugins.tooltip.titleFont = { weight: '600', size: 13 };
     Chart.defaults.plugins.tooltip.bodyFont = { size: 12 };
     Chart.defaults.plugins.tooltip.padding = 10;
-    Chart.defaults.plugins.tooltip.cornerRadius = 6; // Slightly more rounded
-    Chart.defaults.plugins.tooltip.displayColors = false; // Simplified tooltip
+    Chart.defaults.plugins.tooltip.cornerRadius = 6;
+    Chart.defaults.plugins.tooltip.displayColors = false;
     Chart.defaults.plugins.tooltip.boxPadding = 4;
      // Custom Tooltip Title
     Chart.defaults.plugins.tooltip.callbacks.title = function(tooltipItems) {
-        // Only show title if there's data
-        if (tooltipItems.length > 0) {
-            return tooltipItems[0].label;
-        }
+        if (tooltipItems.length > 0) { return tooltipItems[0].label; }
         return '';
      };
      // Custom Tooltip Label with Currency
     Chart.defaults.plugins.tooltip.callbacks.label = function(context) {
         let label = context.dataset.label || '';
-        if (label) {
-            label += ': ';
-        }
+        if (label) { label += ': '; }
         if (context.parsed.y !== null) {
             label += new Intl.NumberFormat('en-PH', { style: 'currency', currency: 'PHP' }).format(context.parsed.y);
-        } else if (context.parsed !== null) { // For doughnut/pie
+        } else if (context.parsed !== null) {
              label += new Intl.NumberFormat('en-PH', { style: 'currency', currency: 'PHP' }).format(context.parsed);
         }
         return label;
@@ -492,8 +451,8 @@ nav.side-menu a:hover i { transform: scale(1.1); }
 
     Chart.defaults.plugins.legend.position = 'bottom';
     Chart.defaults.plugins.legend.labels.usePointStyle = true;
-    Chart.defaults.plugins.legend.labels.boxWidth = 10; // Slightly larger box
-    Chart.defaults.plugins.legend.labels.padding = 20; // More padding
+    Chart.defaults.plugins.legend.labels.boxWidth = 10;
+    Chart.defaults.plugins.legend.labels.padding = 20;
 
 
 // --- Chart JS Logic ---
@@ -506,85 +465,57 @@ if (overviewCtx) {
         data: {
             labels: <?=json_encode($months)?>,
             datasets:[
-                // Use successColor for income
-                { label:'Income', data: <?=json_encode($monthly_income)?>, backgroundColor: successColor, borderRadius: 4 }, // Rounded bars
-                // Use dangerColor for expenses
-                { label:'Expenses', data: <?=json_encode($monthly_expenses)?>, backgroundColor: dangerColor, borderRadius: 4 }, // Rounded bars
-                // Use blueColor for receivables
-                { label:'Receivables Added', data: <?=json_encode($monthly_receivables_added)?>, backgroundColor: blueColor, borderRadius: 4 } // Rounded bars
+                { label:'Income', data: <?=json_encode($monthly_income)?>, backgroundColor: successColor, borderRadius: 4 },
+                { label:'Expenses', data: <?=json_encode($monthly_expenses)?>, backgroundColor: dangerColor, borderRadius: 4 },
+                { label:'Receivables Added', data: <?=json_encode($monthly_receivables_added)?>, backgroundColor: blueColor, borderRadius: 4 }
             ]
         },
         options:{
             responsive:true, maintainAspectRatio: false,
             plugins:{
-                 legend:{ display: true }, // Keep legend
-                 tooltip: {
-                    mode: 'index', // Show all datasets on hover
-                    intersect: false // Don't require exact hover over bar
-                 }
+                 legend:{ display: true },
+                 tooltip: { mode: 'index', intersect: false }
             },
             scales:{
                 y:{
                     beginAtZero:true,
-                    grid: { color: '#eee', // Lighter grid lines
-                           drawBorder: false }, // Remove Y-axis line
-                    ticks: {
-                        padding: 10, // Add padding to ticks
-                        // Format as currency
-                        callback: function(value) { return '₱' + new Intl.NumberFormat('en-PH').format(value); }
-                     },
-                     // Added Y-axis Title
+                    grid: { color: '#eee', drawBorder: false },
+                    ticks: { padding: 10, callback: function(value) { return '₱' + new Intl.NumberFormat('en-PH').format(value); } },
                      title: { display: true, text: 'Amount (₱)', font: { weight: '600' } }
                  },
                  x:{
-                    grid: { display: false }, // No vertical grid lines
+                    grid: { display: false },
                     ticks: { padding: 10 },
-                     // Added X-axis Title
                      title: { display: true, text: 'Month', font: { weight: '600' } }
                  }
              },
-            barPercentage: 0.8, // Adjust bar width if needed
-            categoryPercentage: 0.6 // Adjust space between groups
+            barPercentage: 0.8,
+            categoryPercentage: 0.6
         }
     });
 }
 
 // 2. Today's Summary (Doughnut Chart) - Enhanced
 const dailyCtx = document.getElementById('dailySummaryChart')?.getContext('2d');
-// Calculate Today's Net for the center text
 const todayNet = <?= $today_net ?>;
 const todayNetFormatted = new Intl.NumberFormat('en-PH', { style: 'currency', currency: 'PHP' }).format(todayNet);
 
-// Plugin to draw text in the center of Doughnut chart
 const doughnutLabelPlugin = {
   id: 'doughnutLabel',
   beforeDatasetsDraw(chart, args, pluginOptions) {
     const { ctx, data } = chart;
     const { display, text, color, font } = pluginOptions;
-
-    if (!display || !text) {
-        return;
-    }
-
+    if (!display || !text) { return; }
     ctx.save();
-    const x = chart.getDatasetMeta(0).data[0].x;
-    const y = chart.getDatasetMeta(0).data[0].y;
-
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.font = font || 'bold 14px Poppins'; // Default font
-    ctx.fillStyle = color || Chart.defaults.color; // Default color
-
-    // Draw the main text
+    const x = chart.getDatasetMeta(0).data[0].x; const y = chart.getDatasetMeta(0).data[0].y;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = font || 'bold 14px Poppins'; ctx.fillStyle = color || Chart.defaults.color;
     ctx.fillText(text, x, y);
-
-    // Optional: Draw a subtext below
      if (pluginOptions.subtext) {
-          ctx.font = pluginOptions.subtextFont || '12px Poppins'; // Smaller font for subtext
+          ctx.font = pluginOptions.subtextFont || '12px Poppins';
           ctx.fillStyle = pluginOptions.subtextColor || '#999';
-          ctx.fillText(pluginOptions.subtext, x, y + 20); // Position below main text
+          ctx.fillText(pluginOptions.subtext, x, y + 20);
      }
-
     ctx.restore();
   }
 };
@@ -596,31 +527,21 @@ if (dailyCtx) {
         data:{
             labels:['Income Today', 'Expenses', 'Receivables Added'],
             datasets:[{
-                data:[ <?= max(0.01, $today_income) ?>, <?= max(0.01, $today_expenses) ?>, <?= max(0.01, $today_receivables_added) ?> ], // Ensure non-zero for visibility
-                // Use theme colors
+                data:[ <?= max(0.01, $today_income) ?>, <?= max(0.01, $today_expenses) ?>, <?= max(0.01, $today_receivables_added) ?> ],
                 backgroundColor:[ successColor, dangerColor, blueColor ],
-                borderColor: 'var(--card)', // Background color for spacing effect
-                borderWidth: 4, // Adjust spacing
-                hoverOffset: 8, // Pop out effect on hover
-                hoverBorderColor: 'var(--card)'
+                borderColor: 'var(--card)', borderWidth: 4, hoverOffset: 8, hoverBorderColor: 'var(--card)'
             }]
         },
         options:{
             responsive: true, maintainAspectRatio: false,
             plugins:{
-                legend:{ display: true, position: 'bottom' }, // Show legend below
-                // Configure the custom label plugin
+                legend:{ display: true, position: 'bottom' },
                 doughnutLabel: {
-                    display: true,
-                    text: todayNetFormatted, // Display Today's Net
-                    color: todayNet >= 0 ? successColor : dangerColor, // Color based on positive/negative
-                    font: 'bold 18px Poppins',
-                    subtext: "Today's Net Flow",
-                    subtextFont: '12px Poppins',
-                    subtextColor: mutedColor
+                    display: true, text: todayNetFormatted,
+                    color: todayNet >= 0 ? successColor : dangerColor, font: 'bold 18px Poppins',
+                    subtext: "Today's Net Flow", subtextFont: '12px Poppins', subtextColor: mutedColor
                 },
                  tooltip: {
-                    // Use default tooltip label callback defined above
                      callbacks: {
                         label: function(context) {
                             let label = context.label || '';
@@ -630,13 +551,13 @@ if (dailyCtx) {
                             }
                             return label;
                         },
-                        title: function() { return ''; } // Hide default title
+                        title: function() { return ''; }
                     }
                  }
             },
-            cutout:'70%' // Adjust doughnut thickness
+            cutout:'70%'
         },
-        plugins: [doughnutLabelPlugin] // Register the custom plugin
+        plugins: [doughnutLabelPlugin]
     });
 }
 
@@ -652,18 +573,18 @@ if (openReportModalBtn && reportModal && closeReportModalBtn) {
     reportModal.addEventListener('click', (ev) => { if (ev.target === reportModal) { reportModal.classList.remove('active'); } });
 
     const modalPeriodSelect = document.getElementById('modal_period');
-    const allDateInputs = document.querySelectorAll('.date-input'); // Select all date inputs
+    const allDateInputs = document.querySelectorAll('.date-input');
 
     function toggleModalDateInputs() {
-        allDateInputs.forEach(el => el?.classList.remove('visible')); // Hide all first
+        allDateInputs.forEach(el => el?.classList.remove('visible'));
         const selectedPeriod = modalPeriodSelect?.value;
         const elementToShow = document.getElementById(`modal_${selectedPeriod}_input`);
-        elementToShow?.classList.add('visible'); // Show the correct one
+        elementToShow?.classList.add('visible');
     }
 
     if(modalPeriodSelect) {
-        toggleModalDateInputs(); // Set initial visibility
-        modalPeriodSelect.addEventListener('change', toggleModalDateInputs); // Update on change
+        toggleModalDateInputs();
+        modalPeriodSelect.addEventListener('change', toggleModalDateInputs);
     }
 }
 
@@ -674,6 +595,12 @@ if (openReportModalBtn && reportModal && closeReportModalBtn) {
     });
 <?php endif; ?>
 
+    // --- Add history.replaceState here ---
+    if (window.history && window.history.replaceState) {
+      window.history.replaceState(null, document.title, window.location.href);
+    }
+
 </script>
+
 </body>
 </html>
