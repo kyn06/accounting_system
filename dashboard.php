@@ -223,6 +223,13 @@ unset($_SESSION['report_error']);
 body{background:linear-gradient(135deg,var(--bg1),var(--bg2));color:var(--text-muted);overflow-x:hidden; font-size: 14px;}
 .sidebar{position:fixed;top:0;left:0;height:100vh;width:var(--sidebar-collapsed);background:linear-gradient(180deg,var(--accent) 0%,#ff7ea1 100%); display:flex;flex-direction:column;justify-content:space-between;padding:12px;transition:width .3s ease;z-index:1001}
 .sidebar:hover,.sidebar.expanded{width:var(--sidebar-expanded);box-shadow:var(--shadow-hover)}
+/* Sidebar brand / title */
+.sidebar .brand{display:flex;align-items:center;gap:10px;padding:8px 6px;margin-bottom:0}
+.sidebar .brand .logo{width: 50px;height:40px;border-radius:10px; background:rgba(0, 0, 0, 0.5); display:flex;align-items:center;justify-content:center;overflow:hidden}
+.sidebar .brand .logo img{width:40px;height:40px;object-fit:contain;display:block}
+.sidebar .brand .title{display:none;color:#fff;font-weight:700;font-size:15px;line-height:1}
+.sidebar.expanded .brand .title,.sidebar:hover .brand .title{display:block}
+.sidebar.expanded .brand{padding-left:12px}
 nav.side-menu{margin-top:20px;display:flex;flex-direction:column;gap:8px}
 nav.side-menu a{display:flex;align-items:center;gap:15px;padding:12px;color:#fff;text-decoration:none;border-radius:8px;font-weight:500;transition: all .2s ease;}
 nav.side-menu a i{width:24px;text-align:center; font-size: 1.1em; transition: transform 0.2s ease;}
@@ -283,6 +290,12 @@ nav.side-menu a:hover i { transform: scale(1.1); }
 </head>
 <body>
 <aside class="sidebar" id="sidebar">
+    <div class="brand">
+    <div class="logo">
+      <img src="assets/images/rcrao_logo.png" alt="RCRAO Logo">
+    </div>
+    <div class="title">RCRAO Accounting System</div>
+  </div>
   <nav class="side-menu">
     <a href="dashboard.php" class="active"><i class="fa fa-chart-pie"></i><span class="label">Dashboard</span></a>
     <a href="transactions/collections.php"><i class="fa fa-cash-register"></i><span class="label">Transactions</span></a>
@@ -295,7 +308,7 @@ nav.side-menu a:hover i { transform: scale(1.1); }
 
 <main class="main">
   <div class="header">
-    <h1>Dashboard Overview 📊</h1>
+    <h1>Dashboard</h1>
     <?php if ($is_admin): ?>
     <button class="btn primary" id="openReportModalBtn"><i class="fa fa-file-pdf"></i> Generate PDF Report</button>
     <?php endif; ?>
