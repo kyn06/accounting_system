@@ -2,7 +2,7 @@
 $servername = "127.0.0.1";
 $username = "root";
 $password = "";
-$database = "accounting_system";
+$database = "acc_sys";
 
 $conn = mysqli_connect($servername, $username, $password, $database);
 
