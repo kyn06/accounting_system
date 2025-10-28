@@ -488,13 +488,15 @@ nav.side-menu a:hover,nav.side-menu a.active{background:rgba(255,255,255,0.15);t
 </head>
 <body>
 <aside class="sidebar">
-  <nav class="side-menu">
-    <a href="dashboard.php"><i class="fa fa-chart-line"></i><span class="label">Dashboard</span></a>
-    <a href="transactions/collections.php"><i class="fa fa-exchange-alt"></i><span class="label">Transactions</span></a>
-    <?php if ($_SESSION['role'] === 'admin'): ?>
-    <a href="users.php"><i class="fa fa-users-cog"></i><span class="label">Users</span></a>
-    <a href="reports.php" class="active"><i class="fa fa-file-export"></i><span class="label">Reports</span></a>
-    <?php endif; ?>
+    <nav class="side-menu">
+        <?php if ($_SESSION['role'] === 'admin'): ?>
+        <a href="dashboard.php"><i class="fa fa-chart-line"></i><span class="label">Dashboard</span></a>
+        <?php endif; ?>
+        <a href="transactions/collections.php"><i class="fa fa-exchange-alt"></i><span class="label">Transactions</span></a>
+        <?php if ($_SESSION['role'] === 'admin'): ?>
+        <a href="users.php"><i class="fa fa-users-cog"></i><span class="label">Users</span></a>
+        <a href="reports.php" class="active"><i class="fa fa-file-export"></i><span class="label">Reports</span></a>
+        <?php endif; ?>
     <a href="logout.php"><i class="fa fa-sign-out-alt"></i><span class="label">Logout</span></a>
   </nav>
 </aside>

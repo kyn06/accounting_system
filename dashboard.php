@@ -13,6 +13,13 @@ $user_name = $_SESSION['name'] ?? $_SESSION['username'] ?? 'User'; // Use name, 
 $user_role = $_SESSION['role'] ?? 'user';
 $is_admin = ($user_role === 'admin');
 
+// Restrict dashboard page to admin users only
+if (!$is_admin) {
+    // Redirect non-admin users to the Transactions -> Collections page
+    header("Location: transactions/collections.php");
+    exit();
+}
+
 // *** HELPER FUNCTIONS (Keep as before) ***
 function fetch_val($conn, $sql) {
     $r = mysqli_query($conn, $sql);

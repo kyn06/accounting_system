@@ -183,7 +183,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $is_paid = ($balance <= 0.009) ? 1 : 0;
                 $stmt_recv = $conn->prepare("INSERT INTO receivables (client_name, affiliation, amount, amount_paid, mode_of_payment, is_paid, created_at, reference_number) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
                  if (!$stmt_recv) throw new Exception("Prepare failed (receivables): " . $conn->error);
-                $stmt_recv->bind_param("ssddisss", $client_name, $affiliation, $amount, $amount_paid, $mode_of_payment, $is_paid, $created_at_dt, $receivable_ref);
+                // types: client_name(s), affiliation(s), amount(d), amount_paid(d), mode_of_payment(s), is_paid(i), created_at(s), reference_number(s)
+                $stmt_recv->bind_param("ssddsiss", $client_name, $affiliation, $amount, $amount_paid, $mode_of_payment, $is_paid, $created_at_dt, $receivable_ref);
                 if (!$stmt_recv->execute()) throw new Exception("Execute failed (receivables): " . $stmt_recv->error);
                 $new_receivable_id = $conn->insert_id; // Get ID (assuming it's rec_id)
                 $stmt_recv->close();
@@ -251,9 +252,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $new_is_paid = ($new_balance <= 0.009) ? 1 : 0;
 
         // Use rec_id in WHERE
-        $stmt_update = $conn->prepare("UPDATE receivables SET client_name = ?, affiliation = ?, amount = ?, mode_of_payment = ?, is_paid = ? WHERE rec_id = ?");
-        if ($stmt_update) {
-            $stmt_update->bind_param("ssdsdi", $client_name, $affiliation, $new_amount, $mode_of_payment, $new_is_paid, $rec_id); // Use rec_id
+    $stmt_update = $conn->prepare("UPDATE receivables SET client_name = ?, affiliation = ?, amount = ?, mode_of_payment = ?, is_paid = ? WHERE rec_id = ?");
+    if ($stmt_update) {
+      // types: client_name(s), affiliation(s), amount(d), mode_of_payment(s), is_paid(i), rec_id(i)
+      $stmt_update->bind_param("ssdsii", $client_name, $affiliation, $new_amount, $mode_of_payment, $new_is_paid, $rec_id); // Use rec_id
             if ($stmt_update->execute()) { $_SESSION['success_message'] = "Receivable updated."; }
             else { $_SESSION['error_message'] = "Error updating: " . $stmt_update->error; }
             $stmt_update->close();
@@ -446,8 +448,11 @@ tr:hover{background:#fff6f9}
 <body>
 <aside class="sidebar">
   <nav class="side-menu">
+    <?php if ($role === 'admin'): ?>
     <a href="../dashboard.php"><i class="fa fa-chart-pie"></i><span class="label">Dashboard</span></a>
-    <a href="collections.php"><i class="fa fa-cash-register"></i><span class="label">Transactions</span></a> <?php if ($role === 'admin'): ?>
+    <?php endif; ?>
+    <a href="collections.php"><i class="fa fa-cash-register"></i><span class="label">Transactions</span></a>
+    <?php if ($role === 'admin'): ?>
     <a href="../users.php"><i class="fa fa-users-cog"></i><span class="label">Users</span></a>
     <?php endif; ?>
     <a href="../logout.php"><i class="fa fa-sign-out-alt"></i><span class="label">Logout</span></a>

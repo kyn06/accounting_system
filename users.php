@@ -134,7 +134,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
         $new_username = trim($_POST['username']);
         $new_name = trim($_POST['name']);
-        $new_password = $_POST['password']; // Don't trim password
+        $new_password = $_POST['password'];
         $new_role = trim($_POST['role']);
         $new_status = trim($_POST['status']);
         
@@ -146,7 +146,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $hashed_password = password_hash($new_password, PASSWORD_DEFAULT);
 
         // Check if username already exists
-        $check_stmt = $conn->prepare("SELECT id FROM users WHERE username = ?");
+  $check_stmt = $conn->prepare("SELECT user_id FROM users WHERE username = ?");
         $check_stmt->bind_param("s", $new_username);
         $check_stmt->execute();
         $check_result = $check_stmt->get_result();
@@ -184,8 +184,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $edit_status = trim($_POST['status']);
 
         // Check if username exists for another user
-        $check_stmt = $conn->prepare("SELECT id FROM users WHERE username = ? AND id != ?");
-        $check_stmt->bind_param("si", $edit_username, $id);
+  $check_stmt = $conn->prepare("SELECT user_id FROM users WHERE username = ? AND user_id != ?");
+  $check_stmt->bind_param("si", $edit_username, $id);
         $check_stmt->execute();
         $check_result = $check_stmt->get_result();
 
@@ -193,7 +193,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
              $_SESSION['error_message'] = "Username already exists for another user.";
         } else {
             // Update user details
-            $stmt = $conn->prepare("UPDATE users SET username = ?, name = ?, role = ?, status = ? WHERE id = ?");
+            $stmt = $conn->prepare("UPDATE users SET username = ?, name = ?, role = ?, status = ? WHERE user_id = ?");
             if ($stmt) {
                 $stmt->bind_param("ssssi", $edit_username, $edit_name, $edit_role, $edit_status, $id);
                  if($stmt->execute()){
@@ -218,7 +218,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $id = intval($_POST['id'] ?? 0);
         // Prevent deleting the currently logged-in user
         if ($id > 0 && $id !== $current_user_id) {
-            $stmt = $conn->prepare("DELETE FROM users WHERE id = ?");
+            $stmt = $conn->prepare("DELETE FROM users WHERE user_id = ?");
             if ($stmt) {
                 $stmt->bind_param("i", $id);
                 if($stmt->execute()){
@@ -331,7 +331,9 @@ form[data-mode="edit"] .password-field { display: none; } /* Hide in edit mode *
 <body>
 <aside class="sidebar">
   <nav class="side-menu">
+    <?php if ($current_role === 'admin'): ?>
     <a href="dashboard.php"><i class="fa fa-chart-pie"></i><span class="label">Dashboard</span></a>
+    <?php endif; ?>
     <a href="transactions/collections.php"><i class="fa fa-cash-register"></i><span class="label">Transactions</span></a>
     <?php if ($current_role === 'admin'): // Use variable already defined ?>
     <a href="users.php" class="active"><i class="fa fa-users-cog"></i><span class="label">Users</span></a>
@@ -478,14 +480,14 @@ closeAdd.onclick = () => modalAdd.classList.remove('active');
 
 document.querySelectorAll('.editBtn').forEach(btn=>{
   btn.onclick = (e)=>{
-    const tr = btn.closest('tr');
-    const data = JSON.parse(tr.dataset.row); // This now contains the 'name'
-    formAdd.reset();
-    formAdd.dataset.mode = 'edit'; // Set mode for validation
-    passwordInput.required = false; // Password not required for editing
-    document.getElementById('formAddAction').value = 'edit';
-    document.getElementById('formAddId').value = data.id;
-    nameInput.value = data.name || ''; // Populate name field from data
+  const tr = btn.closest('tr');
+  const data = JSON.parse(tr.dataset.row); // This now contains the 'name' and user_id
+  formAdd.reset();
+  formAdd.dataset.mode = 'edit'; // Set mode for validation
+  passwordInput.required = false; // Password not required for editing
+  document.getElementById('formAddAction').value = 'edit';
+  document.getElementById('formAddId').value = data.user_id;
+  nameInput.value = data.name || ''; // Populate name field from data
     document.getElementById('username').value = data.username;
     document.getElementById('role').value = data.role;
     document.getElementById('status').value = data.status;
@@ -498,8 +500,8 @@ document.querySelectorAll('.editBtn').forEach(btn=>{
 /* Delete - SweetAlert */
 document.querySelectorAll('.deleteBtn').forEach(btn=>{
   btn.onclick = ()=>{
-    const data = JSON.parse(btn.closest('tr').dataset.row);
-    const id = data.id;
+  const data = JSON.parse(btn.closest('tr').dataset.row);
+  const id = Number(data.user_id);
     // Get current user ID from PHP session variable embedded in JS
     const currentUserId = <?= $current_user_id ?>;
 
@@ -523,10 +525,10 @@ document.querySelectorAll('.deleteBtn').forEach(btn=>{
             const deleteForm = document.createElement('form');
             deleteForm.method = 'POST';
             deleteForm.action = 'users.php';
-            deleteForm.innerHTML = `
-                <input type="hidden" name="action" value="delete">
-                <input type="hidden" name="id" value="${id}">
-            `;
+      deleteForm.innerHTML = `
+        <input type="hidden" name="action" value="delete">
+        <input type="hidden" name="id" value="${id}">
+      `;
             document.body.appendChild(deleteForm);
             deleteForm.submit();
         }

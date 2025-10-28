@@ -251,7 +251,9 @@ unset($_SESSION['error_message'], $_SESSION['success_message']);
 <body>
 <aside class="sidebar">
   <nav class="side-menu">
+    <?php if ($role === 'admin'): ?>
     <a href="../dashboard.php"><i class="fa fa-chart-pie"></i><span class="label">Dashboard</span></a>
+    <?php endif; ?>
     <a href="collections.php" ><i class="fa fa-cash-register"></i><span class="label">Transactions</span></a>
     <?php if ($role === 'admin'): ?>
     <a href="../users.php"><i class="fa fa-users-cog"></i><span class="label">Users</span></a>
