@@ -138,104 +138,106 @@ class PDF extends FPDF {
 
                     $this->Rect($x, $y, $detailsWidth, $rowHeight);
                     $this->MultiCell($detailsWidth, $cellHeight, $value, 0, 'L');
+
+                    // ✅ FIX: set X correctly to continue row inline
                     $this->SetXY($x + $detailsWidth, $y);
                 } else {
                     $this->Cell($widths[$i], $rowHeight, $value, 1, 0, $align, $fill);
                 }
             }
 
-            $this->Ln();
+            $this->Ln($rowHeight);
             $fill = !$fill;
         }
 
         $this->Cell(array_sum($widths), 0, '', 0);
         $this->Ln(4);
-}
+    }
+
+
 
   function CalculateWidths($header, $data) {
-        $num_cols = count($header);
-        $pageWidth = $this->GetPageWidth() - $this->lMargin - $this->rMargin;
-        $widths = [];
+    $num_cols = count($header);
+    $pageWidth = $this->GetPageWidth() - $this->lMargin - $this->rMargin;
+    $widths = [];
 
-        if ($num_cols == 5) {
-            $widths[0] = $pageWidth * 0.20;
-            $widths[1] = $pageWidth * 0.15;
-            $widths[2] = $pageWidth * 0.10;
-            $widths[3] = $pageWidth * 0.12;
-            $widths[4] = $pageWidth * 0.43;
-        } else {
+    if ($num_cols == 5) {
+        $widths[0] = $pageWidth * 0.20;
+        $widths[1] = $pageWidth * 0.15;
+        $widths[2] = $pageWidth * 0.10;
+        $widths[3] = $pageWidth * 0.12;
+        $widths[4] = $pageWidth * 0.43;
+    } else {
+        for ($i = 0; $i < $num_cols; $i++) {
+            $widths[$i] = $this->GetStringWidth($header[$i]) + 8;
+        }
+        $sampleData = array_slice($data, 0, 20);
+        foreach ($sampleData as $row) {
             for ($i = 0; $i < $num_cols; $i++) {
-                $widths[$i] = $this->GetStringWidth($header[$i]) + 8;
-            }
-            $sampleData = array_slice($data, 0, 20);
-            foreach ($sampleData as $row) {
-                for ($i = 0; $i < $num_cols; $i++) {
-                    $text = $row[$i] ?? '';
-                    $widths[$i] = max($widths[$i], $this->GetStringWidth($text) + 8);
-                }
-            }
-            $totalWidth = array_sum($widths);
-            $scaleFactor = $pageWidth / $totalWidth;
-            for ($i = 0; $i < $num_cols; $i++) {
-                $widths[$i] *= $scaleFactor;
+                $text = $row[$i] ?? '';
+                $widths[$i] = max($widths[$i], $this->GetStringWidth($text) + 8);
             }
         }
+        $totalWidth = array_sum($widths);
+        $scaleFactor = $pageWidth / $totalWidth;
+        for ($i = 0; $i < $num_cols; $i++) {
+            $widths[$i] *= $scaleFactor;
+        }
+    }
 
-        return $widths;
+    return $widths;
 }
 
-
- function NbLines($w, $txt) {
-        $cw = &$this->CurrentFont['cw'];
-        if ($w == 0) {
-            $w = $this->w - $this->rMargin - $this->x;
-        }
-        $wmax = ($w - 2 * $this->cMargin) * 1000 / $this->FontSize;
-        $s = str_replace("\r", '', $txt);
-        $nb = strlen($s);
-        if ($nb > 0 and $s[$nb - 1] == "\n") {
-            $nb--;
-        }
-        $sep = -1;
-        $i = 0;
-        $j = 0;
-        $l = 0;
-        $nl = 1;
-        while ($i < $nb) {
-            $c = $s[$i];
-            if ($c == "\n") {
-                $i++;
-                $sep = -1;
-                $j = $i;
-                $l = 0;
-                $nl++;
-                continue;
-            }
-            if ($c == ' ') {
-                $sep = $i;
-            }
-            $l += $cw[$c];
-            if ($l > $wmax) {
-                if ($sep == -1) {
-                    if ($i == $j)
-                        $i++;
-                } else {
-                    $i = $sep + 1;
-                }
-                $sep = -1;
-                $j = $i;
-                $l = 0;
-                $nl++;
-            } else {
-                $i++;
-            }
-        }
-        return $nl;
+function NbLines($w, $txt) {
+    $cw = &$this->CurrentFont['cw'];
+    if ($w == 0) {
+        $w = $this->w - $this->rMargin - $this->x;
     }
+    $wmax = ($w - 2 * $this->cMargin) * 1000 / $this->FontSize;
+    $s = str_replace("\r", '', $txt);
+    $nb = strlen($s);
+    if ($nb > 0 and $s[$nb - 1] == "\n") {
+        $nb--;
+    }
+    $sep = -1;
+    $i = 0;
+    $j = 0;
+    $l = 0;
+    $nl = 1;
+    while ($i < $nb) {
+        $c = $s[$i];
+        if ($c == "\n") {
+            $i++;
+            $sep = -1;
+            $j = $i;
+            $l = 0;
+            $nl++;
+            continue;
+        }
+        if ($c == ' ') {
+            $sep = $i;
+        }
+        $l += $cw[$c];
+        if ($l > $wmax) {
+            if ($sep == -1) {
+                if ($i == $j)
+                    $i++;
+            } else {
+                $i = $sep + 1;
+            }
+            $sep = -1;
+            $j = $i;
+            $l = 0;
+            $nl++;
+        } else {
+            $i++;
+        }
+    }
+    return $nl;
+}
 
 }
 // --- END FPDF Class ---
-
 
 // --- Handle POST actions ---
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -267,7 +269,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $pdf->SetFont('Arial', '', 8);
 
         if (!empty($data)) {
-            $header = ['Date & Time', 'User', 'Action', 'Module', 'Details'];
+            $header = ['Date', 'User', 'Action', 'Module', 'Details'];
             $table_data = [];
 
             foreach ($data as $row) {
@@ -292,7 +294,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         $filename = "TransactionLogs_CurrentView_" . date('Ymd_His') . ".pdf";
         if (ob_get_level()) { ob_end_clean(); }
-        $pdf->Output('I', $filename);
+        $pdf->Output('D', $filename);
         exit();
     }
     // --- End PDF Generation ---
